@@ -1,0 +1,8 @@
+numpy>=2,<2.3
+mujoco==3.6.0
+glfw>=2.10.0
+lerobot==0.4.4
+pillow>=12.0.0
+opencv-python>=4.11,<5
+av>=14,<16
+imageio-ffmpeg>=0.5,<1

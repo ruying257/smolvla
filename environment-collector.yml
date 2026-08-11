@@ -1,0 +1,9 @@
+name: smolvla-collector
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - ffmpeg
+  - pip:
+      - -r requirements-collector.txt

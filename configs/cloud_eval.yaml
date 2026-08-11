@@ -1,0 +1,13 @@
+evaluation:
+  output_dir: outputs/eval/smolvla_ur10e
+  fps: 20
+  max_steps: 600
+  scene_seeds:
+    - 10000
+  task_ids:
+    - red_on_blue
+    - red_on_yellow
+    - green_on_blue
+    - green_on_yellow
+  prompt_types:
+    - canonical
