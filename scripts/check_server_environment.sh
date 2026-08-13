@@ -199,7 +199,6 @@ PY
     requirements-cloud.txt \
     constraints.txt \
     configs/cloud_train.yaml \
-    configs/cloud_eval.yaml \
     smolvla-data/smolvla_ur10e/meta \
     smolvla-data/smolvla_ur10e/data \
     smolvla-data/smolvla_ur10e/videos; do

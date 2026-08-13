@@ -138,9 +138,9 @@ python -m scripts.verify_act_layout `
 
 所有路径均由项目文件位置推导，不引用ACT项目的运行时路径，也没有符号链接。
 
-## 云端 SmolVLA 训练与评测（P4）
+## 云端 SmolVLA 训练（P4）
 
-当前云端目标环境为Ubuntu 24.04、Python 3.11、Tesla T4 15 GiB。依赖锁定为PyTorch 2.7.0/cu126、torchvision 0.22.0、TorchCodec 0.5.0、LeRobot 0.4.4和MuJoCo 3.6.0。本机只制作待上传交付包；GPU、模型下载和EGL结论必须以云端日志为准。
+当前云端目标环境为Ubuntu 24.04、Python 3.11、Tesla T4 15 GiB。依赖锁定为PyTorch 2.7.0/cu126、torchvision 0.22.0、TorchCodec 0.5.0、LeRobot 0.4.4和MuJoCo 3.6.0。云端只负责环境检查与训练；训练完成后的checkpoint下载到本笔记本评测。
 
 ### 必须上传的内容
 
@@ -151,9 +151,10 @@ python -m scripts.verify_act_layout `
 ├── assets/                 # 完整XML、mesh、纹理和许可证
 ├── sim/                    # UR10e MuJoCo环境
 ├── collector/              # 数据契约与任务定义
-├── cloud/                  # 云端训练、检查和rollout
+├── cloud/                  # 云端训练和环境检查
+├── evaluate/               # 本机闭环评测代码、入口和文档
 ├── scripts/                # Ubuntu入口脚本
-├── configs/                # 云端训练与评测配置
+├── configs/                # 云端训练和本机评测配置
 ├── tests/
 ├── requirements-cloud.txt
 ├── constraints.txt
@@ -223,7 +224,7 @@ bash scripts/smoke_test.sh \
   --output-dir outputs/smoke
 ```
 
-该命令依次完成环境检查、真实数据加载、1-step训练、checkpoint保存与重新加载、一条EGL闭环rollout，并检查CSV、JSON和MP4均非空。
+该命令依次完成环境检查、真实数据加载、1-step训练，并检查生成的checkpoint是否包含模型配置、权重和策略前后处理器。闭环评测不在云端smoke中执行。
 
 ### 正式训练
 
@@ -239,18 +240,21 @@ bash scripts/train.sh \
 
 确认后移除`--dry-run`执行。训练从`lerobot/smolvla_base`初始化，输入和输出特征由数据集推断为两路相机、7维状态和7维动作，同时增加一路masked empty camera。Tesla T4配置固定为FP16 AMP和batch size 1；默认关闭WandB和Hub上传，不覆盖已有输出目录。15 GiB只保证优先验证P4 smoke链路，正式长训练如发生OOM仍需进一步冻结或改用24 GiB GPU。
 
-### Headless闭环评测
+## 本机 SmolVLA 闭环评测
 
-```bash
-bash scripts/evaluate.sh \
-  --checkpoint outputs/train/smolvla_ur10e \
-  --config configs/cloud_eval.yaml \
-  --output-dir outputs/eval/smolvla_ur10e
+评测固定在本笔记本的`smolvla-eval` Conda环境执行。评测代码和PowerShell入口统一位于`evaluate/`，YAML配置保留在`configs/`。
+
+```powershell
+conda activate smolvla-eval
+.\evaluate\run.ps1 `
+  --checkpoint outputs\train\smolvla_ur10e `
+  --config configs\eval_standard.yaml `
+  --output-dir outputs\eval\standard
 ```
 
-输出目录包含`rollouts.csv`、`summary.json`和`videos/*.mp4`。策略动作必须是有限七维向量；越界值会裁剪到MuJoCo范围并记录`clipped_action_steps`，错误维数、NaN、模型加载或渲染异常会返回非零状态。
+输出目录包含`rollouts.csv`、`summary.json`和`videos/*.mp4`。完整评测框架、指标口径、冒烟命令和checkpoint对比方式见[本机模型效果评测文档](evaluate/README.md)。
 
-### 从其他服务器上传checkpoint
+### 从训练服务器下载checkpoint
 
 不得只传`model.safetensors`，必须上传完整目录：
 

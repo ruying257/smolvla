@@ -1,4 +1,4 @@
-"""编排一轮真实数据训练、checkpoint 重载和 EGL rollout。"""
+"""编排一轮真实数据云端训练并检查 checkpoint。"""
 
 from __future__ import annotations
 
@@ -8,12 +8,12 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
-from cloud.common import PROJECT_ROOT, find_pretrained_model, resolve_path
+from cloud.common import PROJECT_ROOT, resolve_path
 
 
 def build_parser() -> argparse.ArgumentParser:
     """创建 smoke test 参数。"""
-    parser = argparse.ArgumentParser(description="执行 SmolVLA 云端端到端 smoke test")
+    parser = argparse.ArgumentParser(description="执行 SmolVLA 云端训练 smoke test")
     parser.add_argument(
         "--dataset-root",
         type=Path,
@@ -26,7 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=PROJECT_ROOT / "outputs" / "smoke",
         help="smoke 产物根目录，调用前不得存在",
     )
-    parser.add_argument("--skip-bootstrap-check", action="store_true", help="跳过 GPU、模型和 EGL 环境检查")
+    parser.add_argument("--skip-bootstrap-check", action="store_true", help="跳过云端 GPU、模型和 EGL 环境检查")
     return parser
 
 
@@ -37,7 +37,7 @@ def run_checked(command: list[str]) -> None:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """串联 P4 的六项 smoke test 验收动作。"""
+    """串联环境检查、单步训练和 checkpoint 验收。"""
     args = build_parser().parse_args(argv)
     dataset_root = resolve_path(args.dataset_root)
     output_root = resolve_path(args.output_dir)
@@ -65,29 +65,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             "--smoke",
         ]
     )
-    checkpoint = find_pretrained_model(train_output)
-    eval_output = output_root / "eval"
-    run_checked(
-        [
-            python,
-            "-m",
-            "cloud.rollout",
-            "--checkpoint",
-            str(checkpoint),
-            "--output-dir",
-            str(eval_output),
-            "--max-rollouts",
-            "1",
-            "--max-steps",
-            "2",
-        ]
+    required = ("config.json", "model.safetensors", "policy_preprocessor.json", "policy_postprocessor.json")
+    numeric_checkpoints = sorted(
+        (path for path in (train_output / "checkpoints").glob("*") if path.is_dir() and path.name.isdigit()),
+        key=lambda path: int(path.name),
+        reverse=True,
     )
-    required_outputs = (eval_output / "rollouts.csv", eval_output / "summary.json")
-    missing = [path for path in required_outputs if not path.is_file() or path.stat().st_size == 0]
-    videos = list((eval_output / "videos").glob("*.mp4"))
-    if missing or not videos or any(path.stat().st_size == 0 for path in videos):
-        raise RuntimeError(f"smoke 输出不完整: missing={missing}, videos={videos}")
-    print(f"P4 smoke test 通过: checkpoint={checkpoint}, eval={eval_output}")
+    candidates = (
+        train_output / "pretrained_model",
+        train_output / "checkpoints" / "last" / "pretrained_model",
+        *(checkpoint / "pretrained_model" for checkpoint in numeric_checkpoints),
+    )
+    checkpoint = next(
+        (candidate for candidate in candidates if all((candidate / filename).is_file() for filename in required)),
+        None,
+    )
+    if checkpoint is None:
+        raise RuntimeError(f"单步训练未生成完整 checkpoint: {train_output}")
+    print(f"P4 云端训练 smoke test 通过: checkpoint={checkpoint}")
     return 0
 
 

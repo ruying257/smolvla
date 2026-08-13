@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 串联环境检查、单步训练、checkpoint 重载与一条 EGL rollout。
+# 串联环境检查、单步训练与 checkpoint 完整性检查。
 
 set -Eeuo pipefail
 

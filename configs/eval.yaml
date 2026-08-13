@@ -1,7 +1,7 @@
 evaluation:
   output_dir: outputs/eval/smolvla_ur10e
   fps: 20
-  max_steps: 600
+  max_steps: 300
   scene_seeds:
     - 10000
   task_ids:

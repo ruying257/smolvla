@@ -1,25 +1,20 @@
-"""在项目 MuJoCo 环境中执行 SmolVLA 的 EGL 闭环 rollout。"""
+"""在本机 MuJoCo 环境中执行 SmolVLA 闭环评测。"""
 
 from __future__ import annotations
 
 import argparse
 import csv
 import json
-import os
-import sys
 import time
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
-if sys.platform.startswith("linux"):
-    os.environ.setdefault("MUJOCO_GL", "egl")
-
 import imageio.v2 as imageio
 import numpy as np
 
-from cloud.common import (
+from evaluate.common import (
     PROJECT_ROOT,
     convert_policy_action,
     find_pretrained_model,
@@ -61,7 +56,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--config",
         type=Path,
-        default=PROJECT_ROOT / "configs" / "cloud_eval.yaml",
+        default=PROJECT_ROOT / "configs" / "eval.yaml",
         help="评测 YAML 配置",
     )
     parser.add_argument("--output-dir", type=Path, help="覆盖配置中的评测输出目录")
@@ -142,7 +137,22 @@ def run_single_rollout(
     max_steps: int,
     device: str,
 ) -> RolloutResult:
-    """执行一条确定性场景的闭环 rollout 并保存视频。"""
+    """执行一条确定性场景的闭环 rollout 并保存视频。
+
+    Args:
+        policy: 已加载的 LeRobot 策略。
+        preprocessor: 策略输入预处理器。
+        postprocessor: 策略动作后处理器。
+        scene_seed: 可复现场景种子。
+        task_id: 四类搬运任务之一。
+        prompt_type: canonical 或 unseen 指令类型。
+        output_dir: 评测产物目录。
+        fps: 控制与输出视频帧率。
+        max_steps: 单条 rollout 最大控制步数。
+        device: 策略推理设备。
+    Returns:
+        单条闭环评测结果。
+    """
     import torch
 
     task_text = build_prompt(task_id, prompt_type)

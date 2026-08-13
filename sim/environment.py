@@ -388,17 +388,32 @@ class CleanTabletopEnv:
             images[camera_name] = self._renderer.render().copy()
         return images
 
+    def capture_camera(self, camera_name: str) -> RgbImage:
+        """只渲染指定的一路 MuJoCo 相机。
+
+        Args:
+            camera_name: 模型中已定义的相机名称。
+
+        Returns:
+            一张 ``256×256×3`` RGB ``uint8`` 图像。
+        """
+        width, height = self.image_size
+        if self._renderer is None:
+            self._renderer = mujoco.Renderer(self.model, height=height, width=width)
+        _require_object_id(self.model, mujoco.mjtObj.mjOBJ_CAMERA, camera_name)
+        self._renderer.update_scene(self.data, camera=camera_name)
+        return self._renderer.render().copy()
+
     def capture_training_images(self) -> "OrderedDict[str, RgbImage]":
         """渲染策略训练使用的第三方和腕部两路RGB图像。
 
         Returns:
             按 ``agent``、``wrist`` 排列的两张 ``256×256×3`` RGB图像。
         """
-        images = self.capture_cameras()
         return OrderedDict(
             (
-                ("agent", images["agentview"]),
-                ("wrist", images["d435i_rgb"]),
+                ("agent", self.capture_camera("agentview")),
+                ("wrist", self.capture_camera("d435i_rgb")),
             )
         )
 

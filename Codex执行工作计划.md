@@ -1,9 +1,9 @@
 
 ## 1. 目标与职责划分
 
-本计划由当前 Codex 执行。目标是在 `F:\桌面\smolvla` 建立一个独立的 SmolVLA 项目：本机完成第一版代码、可视化 MuJoCo 数据采集和数据质检；云端 Ubuntu 完成环境安装、SmolVLA 微调及 headless 批量评测。用户负责实际键盘遥操作采集，并在云端执行 Codex 提供的命令和脚本，将完整输出回传给 Codex 分析。
+本计划由当前 Codex 执行。目标是在 `F:\桌面\smolvla` 建立一个独立的 SmolVLA 项目：本机完成代码、可视化 MuJoCo 数据采集、数据质检和闭环效果评测；云端 Ubuntu 完成环境安装与 SmolVLA 微调。用户负责实际键盘遥操作采集，并在云端执行训练命令，将完整输出和checkpoint带回本机分析。
 
-项目必须达到以下交付状态：将 `smolvla` 代码项目和已质检数据传到云端后，云端仅需执行项目提供的环境初始化和训练/评测脚本，即可运行，不依赖任何本机绝对路径或 `mujoco-act-robotics` 父目录。
+项目必须达到以下交付状态：将 `smolvla` 代码项目和已质检数据传到云端后，云端可执行环境初始化与训练；完整checkpoint下载后可在本机`smolvla-eval`环境执行闭环评测。两端均不依赖`mujoco-act-robotics`父目录。
 
 ## 2. 已确认边界
 
@@ -14,11 +14,11 @@
 | 原项目改动 | 不修改 `mujoco-act-robotics` 的任何文件 |
 | 资源复用 | 复制最小必要的 UR10e、夹爪、桌面、相机 XML/mesh/纹理和工具代码，不做路径引用或符号链接 |
 | 本机采集 | Windows 或 Ubuntu 均可运行；首轮以本机带 GUI 的 MuJoCo 键盘遥操作采集为主 |
-| 云端 | Ubuntu、可联网、具备 24GB 级 NVIDIA GPU；负责 SmolVLA 训练和 headless 评测 |
+| 云端 | Ubuntu、可联网、具备 24GB 级 NVIDIA GPU；负责 SmolVLA 训练 |
 | 模型 | 仅微调 `lerobot/smolvla_base`，不做 ACT 性能对比 |
 | 任务 | 红/绿积木放到蓝/黄长方形底板，共 4 类英文组合指令 |
 | 数据 | 至少 80 条专家示范；本机采集、回放和质检后再上传 |
-| 评测 | 50 个未见 scene seed x 4 条 canonical 指令，共至少 200 次 rollout |
+| 评测 | 本机`smolvla-eval`执行；标准配置为10个未见seed x 4类任务 x 2种措辞，共80次rollout |
 | 采样规格 | 20 Hz；第三方与腕部两路 RGB 均为 256 x 256 |
 | 观测状态 | 7 维：6 个当前关节角 + 1 个当前夹爪状态 |
 | 策略动作 | 7 维：6 个绝对关节目标角 + 1 个夹爪指令 |
@@ -36,8 +36,9 @@
         v
 本机 smolvla 项目
   |- 跨平台 collector：Windows/Ubuntu GUI 采集、回放、质检
-  |- cloud：Ubuntu 训练、headless rollout、结果汇总
-  |- scripts：数据打包/校验、云端初始化、训练、评测
+  |- cloud：Ubuntu 环境检查和训练
+  |- evaluate：Windows本机闭环rollout、结果汇总和文档
+  |- scripts：数据打包/校验、云端初始化和训练
         |
         | Git：代码、资源、配置、脚本、依赖锁定
         | 人工传输：一个已校验的数据包及其 manifest
@@ -46,7 +47,11 @@
   |- bootstrap_cloud.sh
   |- 验证数据包
   |- train.sh
-  |- evaluate.sh
+  |- 下载完整checkpoint
+        v
+本机 Windows（smolvla-eval）
+  |- python -m evaluate
+  |- evaluate/run.ps1
 ```
 
 ### 3.1 代码与数据传输规则
@@ -75,20 +80,23 @@ F:\桌面\code_learn\smolvla/
     replay.py                   # episode 回放
     validate_dataset.py         # 数据完整性和分布检查
   cloud/
-    train.py                    # SmolVLA 训练入口
-    rollout.py                  # 无 GUI 的闭环 rollout
-    summarize_results.py        # 指标和错误分类汇总
+    train.py                    # SmolVLA 云端训练入口
+  evaluate/
+    rollout.py                  # 本机无 GUI 的闭环 rollout
+    common.py                   # checkpoint、动作和结果工具
+    run.ps1                     # smolvla-eval 统一入口
+    README.md                   # 评测框架、命令与指标
   scripts/
     package_dataset.py          # 生成归档与 manifest
     verify_dataset.py           # 云端校验数据归档
     bootstrap_cloud.sh          # Ubuntu 环境安装与预检
     train.sh
-    evaluate.sh
   configs/
     collection_windows.yaml
     collection_ubuntu.yaml
     cloud_train.yaml
-    cloud_eval.yaml
+    eval.yaml
+    eval_standard.yaml
   requirements-collector.txt
   requirements-cloud.txt
   constraints.txt
@@ -149,7 +157,7 @@ Put the green cube on the yellow pad.
 ```
 
 - 每类任务使用两种等义训练表达并均衡分配：canonical 模板 `Put the {cube_color} cube on the {pad_color} pad.`，等义模板 `Place the {cube_color} cube onto the {pad_color} pad.`。
-- 未见措辞模板 `Move the {cube_color} cube to the {pad_color} pad.` 不得进入训练集，仅保留给云端语言泛化评测。
+- 未见措辞模板 `Move the {cube_color} cube to the {pad_color} pad.` 不得进入训练集，仅保留给本机语言泛化评测。
 - 采集器必须写入 task、scene seed、对象初始位姿、episode 标识和数据集版本。
 - 用户负责实时键盘操作；采集器负责严格成功检测，并在保存前要求用户做最终确认。
 
@@ -189,7 +197,7 @@ Put the green cube on the yellow pad.
 - 编写 `requirements-cloud.txt` 和 `constraints.txt`，锁定 Python、PyTorch、CUDA 兼容的 LeRobot/SmolVLA 依赖。
 - 编写 `bootstrap_cloud.sh`：创建虚拟环境、安装依赖、检查 GPU、MuJoCo、模型下载和 headless 渲染。
 - 编写 `train.sh`：从 `lerobot/smolvla_base` 初始化，读取数据根目录和训练配置。
-- 编写 `evaluate.sh`：读取 checkpoint，运行无 GUI rollout 并导出 CSV/视频。
+- 编写本机`evaluate/`入口：在`smolvla-eval`中读取checkpoint，运行无GUI rollout并导出CSV、JSON和视频。
 - 所有脚本均接收相对路径或显式命令行参数；不得包含本机绝对路径。
 - Codex 负责编写并解释云端命令；用户负责在云端实际运行，并将完整日志和输出回传给 Codex，供其继续定位或调整。
 
@@ -201,23 +209,23 @@ Put the green cube on the yellow pad.
 2. 数据包可解包和校验；
 3. 一批数据可完成模型前向；
 4. 模型输出可转换为 7 维 UR10e 命令；
-5. 云端可使用 EGL 或等价后端完成 headless MuJoCo 渲染和一次 rollout；
-6. checkpoint 可保存、重新加载和执行。
+5. checkpoint可完整保存，并包含模型配置、权重和策略前后处理器；
+6. checkpoint下载后可由本机评测入口重新加载和执行。
 
 ### 验收
 
 - 云端只依赖 `smolvla` 目录、数据归档、网络和公开模型 ID。
-- `bootstrap_cloud.sh`、`train.sh`、`evaluate.sh` 的命令与输出路径写入 README。
+- `bootstrap_cloud.sh`、`train.sh`与本机`evaluate/run.ps1`的命令和输出路径写入README。
 - 任何数据校验失败、模型下载失败、GPU 不可用或 headless 渲染失败都应在 smoke test 阶段暴露，而非正式训练中途。
 
-## 10. 阶段 P5：正式云端训练与评测
+## 10. 阶段 P5：正式云端训练与本机评测
 
 ### 工作
 
 - 手工传输经 P3 打包和校验的数据归档至云端；先运行校验脚本。
 - 在 24GB 级 GPU 上从 `smolvla_base` 微调。先采用小 batch、梯度累积和保守的模块冻结策略；精确参数由 P4 smoke test 决定。
 - 保存数据版本、训练配置、随机 seed、checkpoint、日志和 rollout 视频。
-- 使用 50 个未训练 scene seed，对 4 条 canonical 指令执行至少 200 次 headless rollout。
+- 下载完整checkpoint，在本机使用10个未训练scene seed、4类任务和canonical/unseen两种措辞执行80次闭环rollout。
 - 额外执行未见措辞评测，并与 canonical 结果分开统计。
 
 ### 输出指标
