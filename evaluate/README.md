@@ -1,58 +1,54 @@
 # SmolVLA 本机模型效果评测
 
-本文档定义 SmolVLA 在本笔记本 `smolvla-eval` Conda 环境中的 MuJoCo 闭环评测框架、命令、指标和验收口径。核心结论来自闭环任务成功率，不以训练 loss 或单步动作误差替代。
+本文档定义 SmolVLA 在本笔记本 `smolvla-eval` Conda环境中的MuJoCo闭环评测框架。正式结论来自固定实验矩阵上的重复闭环成功率，而不是训练loss、单个视频或单次随机rollout。
 
-## 1. 评测框架
+## 1. 为什么需要两种seed
+
+评测包含两个相互独立的随机来源：
+
+- `scene_seed`：控制两个积木的初始位置；同一seed复现相同场景。
+- `policy_seed`：控制SmolVLA Flow Matching生成Action Chunk时的采样噪声。
+
+只固定`scene_seed`不能复现完整策略轨迹。SmolVLA每次生成Action Chunk时会从随机噪声开始去噪；相同场景、任务和checkpoint可能因`policy_seed`不同而一次成功、一次失败。因此正式评测必须重复模型随机种子，并把两种seed都写入结果。
+
+## 2. 正式实验矩阵
+
+`configs/eval_standard.yaml`锁定：
 
 ```text
-完整 checkpoint
-  -> 加载策略、预处理器和后处理器
-  -> 按 scene_seed 重置 MuJoCo 场景
-  -> 生成 canonical / unseen 任务指令
-  -> 以 20 Hz 循环执行
-       两路 256×256 RGB + 7 维状态
-       -> SmolVLA CUDA 推理
-       -> 7 维动作检查和限位
-       -> MuJoCo 执行动作
-       -> 严格成功/失败判定
-  -> 输出逐条 CSV、汇总 JSON 和双相机 MP4
+10个未见scene seed（10000-10009）
+× 4类任务
+× 3种措辞
+× 2个policy seed（20260、20261）
+= 240条rollout
 ```
 
-评测集合为 `scene_seeds × task_ids × prompt_types`：
+三种措辞为：
 
-- 四类任务：`red_on_blue`、`red_on_yellow`、`green_on_blue`、`green_on_yellow`；
-- `canonical`：训练使用过的模板，如 `Put the red cube on the blue pad.`；
-- `unseen`：训练未使用的同义模板，如 `Move the red cube to the blue pad.`；
-- 同一 `scene_seed` 的积木初始位置严格复现。
+| 类型 | 示例 | 训练状态 |
+| --- | --- | --- |
+| `canonical` | Put the red cube on the blue pad. | 已见 |
+| `synonym` | Place the red cube onto the blue pad. | 已见 |
+| `unseen` | Move the red cube to the blue pad. | 未见 |
 
-本评测仅代表 MuJoCo 仿真闭环效果，不代表真实 UR10e 成功率。
+训练数据使用的scene seed为`0-9`与`100-139`，正式测试使用`10000-10009`，不存在布局seed重合。专家示范最长351步，因此正式超时锁定为400步，即20 Hz下20秒，并提供约14%余量。
 
-## 2. 本机环境
+严格成功必须满足：指定积木完整进入目标区域内缩5 mm后的范围、连续稳定0.5秒且夹爪已经释放。
 
-已验证环境：Windows、Python 3.11、PyTorch 2.7.0+cu126、LeRobot 0.4.4、MuJoCo 3.6.0、NVIDIA GeForce GTX 1650。评测不使用云端 `.venv-cloud`，也不设置 EGL。
+## 3. 环境与checkpoint
 
-统一入口默认启用 Hugging Face 与 Transformers 离线模式，避免评测过程中访问网络。首次评测前，本机缓存必须包含 checkpoint 所引用的 `HuggingFaceTB/SmolVLM2-500M-Video-Instruct` 配置、处理器和权重；缺失时入口会快速报错，需要先在可联网环境补齐缓存。
-
-进入项目并激活环境：
+已验证环境为Windows、Python 3.11、PyTorch 2.7.0+cu126、LeRobot 0.4.4、MuJoCo 3.6.0和GTX 1650。评测不使用云端`.venv-cloud`或EGL。
 
 ```powershell
 cd F:\桌面\smolvla
 conda activate smolvla-eval
-```
-
-检查 Python、CUDA 和 GPU：
-
-```powershell
-python -c "import sys, torch; print(sys.version); print(torch.__version__); print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"
-```
-
-检查 MuJoCo 本机无窗口渲染：
-
-```powershell
+python -c "import torch; print(torch.__version__); print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0))"
 python view_scene.py --headless --steps 10 --scene-seed 10000
 ```
 
-checkpoint 必须至少包含：
+统一入口默认启用Hugging Face离线模式。本机缓存必须包含checkpoint引用的`HuggingFaceTB/SmolVLM2-500M-Video-Instruct`配置、处理器与权重。
+
+checkpoint至少包含：
 
 ```text
 pretrained_model/
@@ -62,174 +58,130 @@ pretrained_model/
 └── policy_postprocessor.json
 ```
 
-`--checkpoint` 可指向完整 `pretrained_model`、单个 checkpoint 或训练输出根目录，入口会自动寻找最新的完整模型。不要只复制 `model.safetensors`。
+## 4. 分阶段执行
 
-## 3. 执行命令
-
-### 3.1 Windows 统一入口
-
-PowerShell 入口会拒绝非 `smolvla-eval` 环境：
+### 4.1 自动测试
 
 ```powershell
 conda activate smolvla-eval
-.\evaluate\run.ps1 `
-  --checkpoint outputs\train\smolvla_ur10e `
-  --config configs\eval.yaml `
-  --output-dir outputs\eval\basic
+python -m unittest discover -s tests -v
 ```
 
-也可直接使用 Python 模块：
+### 4.2 两步链路冒烟
 
-```powershell
-python -m evaluate `
-  --checkpoint outputs\train\smolvla_ur10e `
-  --config configs\eval.yaml `
-  --output-dir outputs\eval\basic
-```
-
-默认使用 `--device cuda`。仅在调试加载和控制链时使用 `--device cpu`。
-
-本机 GTX 1650 的推理速度明显低于训练服务器。短链路通过只证明评测可运行，80条标准评测应预留较长时间，并以实际 `latency_mean_ms` 为准。
-
-### 3.2 链路冒烟评测
-
-只验证模型加载、CUDA 前向、渲染、动作执行及产物写出，不评价模型效果：
-
-```powershell
-.\evaluate\run.ps1 `
-  --checkpoint outputs\train\smolvla_ur10e `
-  --config configs\eval.yaml `
-  --output-dir outputs\eval\smoke `
-  --max-rollouts 1 `
-  --max-steps 2
-```
-
-### 3.3 基础评测
-
-`configs/eval.yaml` 包含 1 seed × 4 tasks × 1 canonical prompt，共 4 条 rollout：
-
-```powershell
-.\evaluate\run.ps1 `
-  --checkpoint outputs\train\smolvla_ur10e `
-  --config configs\eval.yaml `
-  --output-dir outputs\eval\basic
-```
-
-基础评测用于快速回归，样本量不足以支持最终效果结论。
-
-### 3.4 标准效果评测
-
-`configs/eval_standard.yaml` 固定 10 seeds × 4 tasks × 2 prompts，共 80 条 rollout：
+只验证checkpoint加载、CUDA前向、随机种子、视频、manifest和JSONL，不评价模型效果：
 
 ```powershell
 .\evaluate\run.ps1 `
   --checkpoint outputs\train\smolvla_ur10e `
   --config configs\eval_standard.yaml `
-  --output-dir outputs\eval\standard
+  --output-dir outputs\eval\smoke_reproducible `
+  --max-rollouts 4 `
+  --max-steps 2 `
+  --keep-all-videos
 ```
 
-正式运行前确认 `10000` 至 `10009` 未参与训练数据采集。若存在重合，应整体替换为一组固定的未见 seed，并对所有 checkpoint 使用同一集合。
+### 4.3 24条预实验
 
-### 3.5 调试覆盖参数
-
-```powershell
-python -m evaluate `
-  --checkpoint outputs\train\smolvla_ur10e `
-  --config configs\eval_standard.yaml `
-  --output-dir outputs\eval\debug `
-  --max-rollouts 2 `
-  --max-steps 300
-```
-
-改变最大步数后的成功率不能与 600 步标准结果直接比较。
-
-## 4. 指标口径
-
-严格成功必须同时满足：指定积木完整进入目标区域内缩 5 mm 后的范围、连续稳定 0.5 秒、夹爪已经释放。
-
-| 指标 | 定义 |
-| --- | --- |
-| 总体成功率 | `successes / rollouts`，第一主指标 |
-| canonical / unseen 成功率 | 已见模板能力与语言措辞泛化能力 |
-| 单任务成功率 | 分别检查四种颜色与目标组合 |
-| 跨 seed 成功率 | 检查初始布局稳定性 |
-| `steps` | 实际控制步数 |
-| `latency_mean_ms` / `latency_p95_ms` | 单条轨迹的策略调用平均值与 P95 |
-| `clipped_action_steps` | 至少一个动作维度被安全限位的步数 |
-
-失败类型包括：
-
-| `failure_mode` | 含义 |
-| --- | --- |
-| `success` | 满足严格成功条件 |
-| `wrong_cube` | 操作错误积木 |
-| `wrong_pad` | 放入错误区域 |
-| `dropped_or_out_of_bounds` | 积木掉落或越界 |
-| `timeout` | 最大步数内未完成 |
-| `control_exception` | 状态、动作、推理、渲染或控制异常 |
-
-当前汇总中的延迟 P95 是各 rollout P95 的再聚合，不是全部控制步合并后的全局 P95。不同 checkpoint 必须在相同代码、GPU、AMP、相机、FPS、步数和评测集合上比较。
-
-## 5. 输出与检查
+使用正式配置的第一个scene seed。由于矩阵顺序为`scene → task → prompt → policy`，前24条刚好覆盖：
 
 ```text
-outputs/eval/standard/
-├── rollouts.csv
-├── summary.json
+1 scene × 4 tasks × 3 prompts × 2 policy seeds
+```
+
+```powershell
+.\evaluate\run.ps1 `
+  --checkpoint outputs\train\smolvla_ur10e `
+  --config configs\eval_standard.yaml `
+  --output-dir outputs\eval\pilot_020000 `
+  --max-rollouts 24 `
+  --keep-all-videos
+```
+
+预实验用于检查显存、耗时、失败分类和恢复机制，不并入正式240条结果。
+
+### 4.4 正式240条实验
+
+正式运行开始后不得根据中间结果修改checkpoint、seed、措辞、超时或成功条件。
+
+```powershell
+.\evaluate\run.ps1 `
+  --checkpoint outputs\train\smolvla_ur10e `
+  --config configs\eval_standard.yaml `
+  --output-dir outputs\eval\formal_020000
+```
+
+运行中断后使用完全相同的命令并增加`--resume`：
+
+```powershell
+.\evaluate\run.ps1 `
+  --checkpoint outputs\train\smolvla_ur10e `
+  --config configs\eval_standard.yaml `
+  --output-dir outputs\eval\formal_020000 `
+  --resume
+```
+
+默认在整批完成后保留全部失败视频，并为每个`task_id × prompt_type`保留按seed排序的第一条成功视频。若需要保留全部视频，首次启动和每次续跑都必须增加`--keep-all-videos`；视频策略属于manifest身份，不能在同一run中途改变。
+
+## 5. 可恢复性与追溯
+
+每条轨迹以以下字符串作为唯一实验键：
+
+```text
+scene=<scene_seed>|task=<task_id>|prompt=<prompt_type>|policy=<policy_seed>
+```
+
+每条完成后立即落盘到`rollouts.jsonl`并刷新磁盘。`--resume`会：
+
+1. 校验checkpoint、权重SHA-256、评测源码SHA-256、环境、配置、步数、实验键和视频策略；
+2. 拒绝损坏JSONL、重复实验键和缺失的保留视频；
+3. 跳过合法完成项；
+4. 移除并重新执行`control_exception`或带`error`的轨迹。
+
+checkpoint、代码、环境或配置变化时必须创建新输出目录，不能向旧run混写。
+
+## 6. 输出结构
+
+```text
+outputs/eval/formal_020000/
+├── run_manifest.json       # checkpoint、代码、配置、环境和240个实验键
+├── rollouts.jsonl          # 每条完成后即时追加的恢复日志
+├── rollouts.csv            # 最终逐条结果
+├── summary.json            # 机器可读统计
+├── report.md               # 人工可读报告
+├── video_retention.json    # 成功视频清理与保留清单
 └── videos/
-    └── seed_<seed>_<task_id>_<prompt_type>.mp4
 ```
 
-查看总体结果：
+每条结果包含`scene_seed`、`policy_seed`、`rollout_key`、任务与措辞、成功和失败类型、步数、推理延迟、动作裁剪率、checkpoint SHA-256、视频状态、错误和完成时间。
+
+## 7. 统计口径
+
+第一主指标为总体严格成功率，同时报告：
+
+- 按`scene_seed`整组重采样10000次得到的Bootstrap 95%置信区间；
+- 四任务等权宏平均成功率；
+- canonical、synonym、unseen成功率；
+- `seen=(canonical+synonym)/2`与unseen的语言泛化差距；
+- 分任务、分场景和分policy seed成功率；
+- 固定场景、任务、措辞下的`2/2`稳定成功、`1/2`采样敏感、`0/2`稳定失败；
+- `wrong_cube`、`wrong_pad`、`dropped_or_out_of_bounds`、`timeout`和`control_exception`分布；
+- 成功轨迹步数中位数和P90；
+- 发生裁剪的轨迹比例及总裁剪步数占比；
+- 推理延迟中位数和P95。
+
+`control_exception`属于评测有效性异常，入口返回非零状态；修复原因后通过`--resume`重跑，不能把它当作普通模型失败解释。
+
+## 8. 结果检查
 
 ```powershell
-Get-Content outputs\eval\standard\summary.json -Encoding UTF8
-```
-
-标准评测的 `rollouts.csv` 应有 80 条数据：
-
-```powershell
-$rows = Import-Csv outputs\eval\standard\rollouts.csv
+$rows = Import-Csv outputs\eval\formal_020000\rollouts.csv
 $rows.Count
+($rows.rollout_key | Sort-Object -Unique).Count
+Get-Content outputs\eval\formal_020000\summary.json -Encoding UTF8
+Get-Content outputs\eval\formal_020000\report.md -Encoding UTF8
 ```
 
-查看失败轨迹：
+正式结果必须同时满足：240条结果、240个唯一实验键、10个scene seed、4类任务、3种措辞、2个policy seed、无`control_exception`。
 
-```powershell
-$rows | Where-Object { $_.success -ne 'True' } | Format-Table scene_seed,task_id,prompt_type,failure_mode,video_path,error
-```
-
-按任务与措辞统计成功率：
-
-```powershell
-$rows | Group-Object task_id,prompt_type | ForEach-Object {
-  $successes = @($_.Group | Where-Object { $_.success -eq 'True' }).Count
-  [pscustomobject]@{ Group = $_.Name; Successes = $successes; Total = $_.Count; Rate = $successes / $_.Count }
-} | Format-Table
-```
-
-检查动作裁剪或异常：
-
-```powershell
-$rows | Where-Object { [int]$_.clipped_action_steps -gt 0 -or $_.error } | Format-List
-```
-
-## 6. Checkpoint 公平对比
-
-```powershell
-python -m evaluate --checkpoint outputs\train\experiment_a --config configs\eval_standard.yaml --output-dir outputs\eval\experiment_a
-python -m evaluate --checkpoint outputs\train\experiment_b --config configs\eval_standard.yaml --output-dir outputs\eval\experiment_b
-```
-
-先确认 rollout 数一致且 `error` 为空，再依次比较总体成功率、canonical/unseen 成功率、四类任务、各 seed、失败结构、成功轨迹步数、延迟和动作裁剪。不要依据单个视频、单个 seed 或训练 loss 宣布模型提升。
-
-## 7. 验收清单
-
-- [ ] 当前环境为 `smolvla-eval`，CUDA 可用；
-- [ ] 使用完整 checkpoint 和训练时保存的处理器；
-- [ ] 评测 seed 固定且不与训练采集 seed 重合；
-- [ ] 正式评测覆盖四类任务和两种措辞；
-- [ ] CSV 数量等于配置组合数，JSON 可解析，视频非空；
-- [ ] `error` 为空，异常轨迹已修复后重新评测；
-- [ ] checkpoint 对比使用完全相同的运行条件；
-- [ ] 结论明确限定为 MuJoCo 仿真闭环结果。
+本结果只代表当前checkpoint在本机MuJoCo仿真闭环中的能力，不代表真实UR10e成功率，也不能在缺少基座或其他checkpoint对照时宣称“训练带来提升”。

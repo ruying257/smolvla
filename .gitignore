@@ -11,3 +11,5 @@ datasets/
 smolvla-data/
 *.mp4
 *.zip
+evaluate/
+collector/

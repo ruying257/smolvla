@@ -1,0 +1,15 @@
+evaluation:
+  output_dir: outputs/eval/seen_canonical
+  fps: 20
+  max_steps: 400
+  scene_seeds:
+    - 0
+    - 1
+    - 2
+  task_ids:
+    - red_on_blue
+    - red_on_yellow
+    - green_on_blue
+    - green_on_yellow
+  prompt_types:
+    - canonical

@@ -242,17 +242,18 @@ bash scripts/train.sh \
 
 ## 本机 SmolVLA 闭环评测
 
-评测固定在本笔记本的`smolvla-eval` Conda环境执行。评测代码和PowerShell入口统一位于`evaluate/`，YAML配置保留在`configs/`。
+评测固定在本笔记本的`smolvla-eval` Conda环境执行。正式矩阵为10个未见场景、4类任务、canonical/synonym/unseen三种措辞和2个policy seed，共240条；每条最多400步。评测代码和PowerShell入口统一位于`evaluate/`，YAML配置保留在`configs/`。
 
 ```powershell
 conda activate smolvla-eval
 .\evaluate\run.ps1 `
   --checkpoint outputs\train\smolvla_ur10e `
   --config configs\eval_standard.yaml `
-  --output-dir outputs\eval\standard
+  --output-dir outputs\eval\formal_020000 `
+  --resume
 ```
 
-输出目录包含`rollouts.csv`、`summary.json`和`videos/*.mp4`。完整评测框架、指标口径、冒烟命令和checkpoint对比方式见[本机模型效果评测文档](evaluate/README.md)。
+入口同时固定场景seed与SmolVLA采样使用的policy seed，每条完成后即时写入JSONL并支持严格断点续跑。输出包含运行manifest、JSONL、CSV、汇总JSON、Markdown报告、视频保留清单和审计视频。完整实验设计、Bootstrap口径、冒烟及预实验命令见[本机模型效果评测文档](evaluate/README.md)。
 
 ### 从训练服务器下载checkpoint
 

@@ -1,7 +1,11 @@
+# 正式配置：10个未见场景 × 4类任务 × 3种措辞 × 2个模型随机种子 = 240条。
+# scene_seed只控制积木初始布局；policy_seed控制SmolVLA Flow Matching采样噪声。
 evaluation:
-  output_dir: outputs/eval/standard
+  output_dir: outputs/eval/formal_020000
   fps: 20
-  max_steps: 300
+  # 专家轨迹最大351步，400步即20秒仿真时间，并提供约14%的完成余量。
+  max_steps: 400
+  # 训练seed范围为0-9和100-139；正式测试使用完全未见的10000-10009。
   scene_seeds:
     - 10000
     - 10001
@@ -18,6 +22,11 @@ evaluation:
     - red_on_yellow
     - green_on_blue
     - green_on_yellow
+  # canonical和synonym均在训练中出现；unseen用于语言泛化测试。
   prompt_types:
     - canonical
+    - synonym
     - unseen
+  policy_seeds:
+    - 20260
+    - 20261

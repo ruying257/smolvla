@@ -18,7 +18,7 @@
 | 模型 | 仅微调 `lerobot/smolvla_base`，不做 ACT 性能对比 |
 | 任务 | 红/绿积木放到蓝/黄长方形底板，共 4 类英文组合指令 |
 | 数据 | 至少 80 条专家示范；本机采集、回放和质检后再上传 |
-| 评测 | 本机`smolvla-eval`执行；标准配置为10个未见seed x 4类任务 x 2种措辞，共80次rollout |
+| 评测 | 本机`smolvla-eval`执行；10个未见scene seed x 4类任务 x 3种措辞 x 2个policy seed，共240次rollout |
 | 采样规格 | 20 Hz；第三方与腕部两路 RGB 均为 256 x 256 |
 | 观测状态 | 7 维：6 个当前关节角 + 1 个当前夹爪状态 |
 | 策略动作 | 7 维：6 个绝对关节目标角 + 1 个夹爪指令 |
@@ -225,8 +225,9 @@ Put the green cube on the yellow pad.
 - 手工传输经 P3 打包和校验的数据归档至云端；先运行校验脚本。
 - 在 24GB 级 GPU 上从 `smolvla_base` 微调。先采用小 batch、梯度累积和保守的模块冻结策略；精确参数由 P4 smoke test 决定。
 - 保存数据版本、训练配置、随机 seed、checkpoint、日志和 rollout 视频。
-- 下载完整checkpoint，在本机使用10个未训练scene seed、4类任务和canonical/unseen两种措辞执行80次闭环rollout。
-- 额外执行未见措辞评测，并与 canonical 结果分开统计。
+- 下载完整checkpoint，在本机使用10个未训练scene seed、4类任务、canonical/synonym/unseen三种措辞和2个policy seed执行240次闭环rollout。
+- 每条最多400步；同时固定scene seed与Flow Matching采样使用的policy seed。
+- 每条结果即时写入JSONL并支持manifest严格校验的断点续跑；正式结果使用scene分层Bootstrap计算95%置信区间。
 
 ### 输出指标
 
@@ -238,7 +239,7 @@ Put the green cube on the yellow pad.
 
 ### 完成与效果判定
 
-- 首版不预设人为成功率硬指标，以严格、可复现的 200 次评测建立真实基线。
+- 首版不预设人为成功率硬指标，以固定矩阵上的240次评测建立真实基线。
 - 数据、训练、checkpoint 重载和闭环评测链路完整可复现时，可判定工程链路完成；如果策略成功率较低，不得表述为策略效果达标。
 - 策略效果不足时，根据分任务指标和失败分类进行一轮有边界的补采或调参，不得通过改变成功判定、scene seed 或统计口径制造更高成功率。
 
@@ -250,7 +251,7 @@ Put the green cube on the yellow pad.
 | Windows GUI 或键盘控制异常 | P2 前先验证 viewer、键盘事件、双相机和单 episode 保存 |
 | Windows/Ubuntu 数据 schema 漂移 | 采集/云端共享同一数据 contract；打包 manifest 记录版本并由云端校验 |
 | 人工传输漏文件或数据错版 | 只传单一数据归档和 manifest；云端验签失败即停止 |
-| 云端无 headless OpenGL | P4 对 EGL/等价后端做一次真实 rollout，不只 import MuJoCo |
+| 本机无窗口渲染失败 | 在`smolvla-eval`中执行真实短rollout，不只import MuJoCo |
 | SmolVLA 输入与数据不匹配 | P4 用真实小样本完成前向、短训练、checkpoint 加载和 rollout |
 | 语言被视觉位置捷径替代 | 训练数据加入共享 scene seed 下四指令配对；评测使用反事实指令切换 |
 | 数据不足或泛化差 | 先小数据打通，再补采失败位姿和反事实场景；不得只增加训练步数 |
@@ -265,7 +266,7 @@ Put the green cube on the yellow pad.
 - P1 新场景仍引用或依赖 `mujoco-act-robotics`；
 - P2 采集数据无法回放或 feature schema 不完整；
 - P3 数据包在本机自校验失败；
-- P4 云端无法完成一次真实前向和 headless rollout；
+- 本机`smolvla-eval`无法完成一次真实前向和无窗口短rollout；
 - 同一场景切换指令后策略行为不随对象/目标语义改变。
 
 ## 13. 非目标与表达边界
