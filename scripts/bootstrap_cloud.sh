@@ -5,7 +5,7 @@ set -Eeuo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV_PATH="${PROJECT_ROOT}/.venv-cloud"
-TORCH_INDEX_URL="${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu126}"
+TORCH_INDEX_URL="${TORCH_INDEX_URL:-https://mirrors.nju.edu.cn/pytorch/whl/cu126}"
 BOOTSTRAP_PYTHON="${SMOLVLA_BOOTSTRAP_PYTHON:-}"
 INSTALL_SYSTEM_PACKAGES=0
 SKIP_MODEL_DOWNLOAD=0
@@ -49,8 +49,17 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ "${INSTALL_SYSTEM_PACKAGES}" == "1" ]]; then
-  sudo apt-get update
-  sudo apt-get install -y ffmpeg libegl1 libgl1 libglvnd0 python3-venv
+  # 云容器经常直接以 root 运行且不提供 sudo；普通用户环境仍通过 sudo 提权。
+  if [[ "$(id -u)" == "0" ]]; then
+    APT_COMMAND=(apt-get)
+  elif command -v sudo >/dev/null 2>&1; then
+    APT_COMMAND=(sudo apt-get)
+  else
+    echo "安装系统依赖需要 root 或 sudo；请先安装 ffmpeg、libegl1、libgl1、libglvnd0 和 python3-venv。" >&2
+    exit 1
+  fi
+  "${APT_COMMAND[@]}" update
+  "${APT_COMMAND[@]}" install -y ffmpeg libegl1 libgl1 libglvnd0 python3-venv
 fi
 
 if [[ -z "${BOOTSTRAP_PYTHON}" ]] && command -v python3.11 >/dev/null 2>&1; then

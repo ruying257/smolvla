@@ -183,14 +183,14 @@ def run_collection(args: argparse.Namespace) -> int:
                     if machine.phase == CollectionPhase.PENDING_CONFIRMATION:
                         if viewer.consume_key_press(glfw.KEY_ENTER):
                             frame_count = machine.frame_count
+                            episode_index = writer.save_episode(
+                                task_id,
+                                template_id,
+                                task_text,
+                                snapshot,
+                                frame_count,
+                            )
                             if machine.confirm():
-                                episode_index = writer.save_episode(
-                                    task_id,
-                                    template_id,
-                                    task_text,
-                                    snapshot,
-                                    frame_count,
-                                )
                                 confirmed_count += 1
                                 print(
                                     f"已保存 episode={episode_index}, seed={scene_seed}, "

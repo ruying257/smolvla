@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+import shutil
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -21,7 +24,10 @@ from collector.control import (
 from collector.dataset_io import (
     DATASET_FPS,
     DATASET_VERSION,
+    LeRobotEpisodeWriter,
+    _accessible_mkdtemp,
     contract_mismatches,
+    concatenate_video_files_utf8,
     dataset_features,
     expected_contract,
     find_ffmpeg,
@@ -128,6 +134,80 @@ class DatasetContractTest(unittest.TestCase):
         executable = find_ffmpeg()
         self.assertIsNotNone(executable)
         self.assertTrue(executable.is_file())
+
+    def test_video_concatenation_supports_chinese_paths(self) -> None:
+        """第二个episode的视频应能追加到中文目录中的已有视频。"""
+        import av
+
+        def write_video(path: Path, color: int) -> None:
+            """写入两帧用于验证remux的H.264视频。"""
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with av.open(str(path), "w") as container:
+                stream = container.add_stream("h264", rate=20)
+                stream.width = 32
+                stream.height = 32
+                stream.pix_fmt = "yuv420p"
+                for _ in range(2):
+                    image = np.full((32, 32, 3), color, dtype=np.uint8)
+                    frame = av.VideoFrame.from_ndarray(image, format="rgb24")
+                    for packet in stream.encode(frame):
+                        container.mux(packet)
+                for packet in stream.encode():
+                    container.mux(packet)
+
+        temporary_directory = Path(_accessible_mkdtemp(dir=Path.cwd()))
+        try:
+            chinese_directory = temporary_directory / "中文路径"
+            first_path = chinese_directory / "first.mp4"
+            second_path = chinese_directory / "second.mp4"
+            output_path = chinese_directory / "output.mp4"
+            write_video(first_path, 32)
+            write_video(second_path, 224)
+
+            concatenate_video_files_utf8([first_path, second_path], output_path)
+
+            with av.open(str(output_path)) as container:
+                decoded_frames = sum(1 for _ in container.decode(video=0))
+            self.assertEqual(decoded_frames, 4)
+        finally:
+            shutil.rmtree(temporary_directory, ignore_errors=True)
+
+    def test_discard_removes_video_feature_png_directories(self) -> None:
+        """取消episode时必须清理LeRobot未覆盖的video临时PNG目录。"""
+        temporary_directory = Path(_accessible_mkdtemp(dir=Path.cwd()))
+        try:
+            video_directory = temporary_directory / "images" / "agent" / "episode-000000"
+            video_directory.mkdir(parents=True)
+            (video_directory / "frame-000000.png").write_bytes(b"stale")
+
+            class FakeDataset:
+                """提供丢弃逻辑所需的最小LeRobot数据集接口。"""
+
+                def __init__(self) -> None:
+                    self.meta = SimpleNamespace(video_keys=["observation.images.agent"])
+                    self.episode_buffer = {"episode_index": 0}
+                    self.cleared = False
+
+                def _wait_image_writer(self) -> None:
+                    """模拟等待异步图像写入完成。"""
+
+                def _get_image_file_dir(self, episode_index: int, video_key: str) -> Path:
+                    """返回测试用video feature临时目录。"""
+                    self.assert_inputs = (episode_index, video_key)
+                    return video_directory
+
+                def clear_episode_buffer(self, delete_images: bool = True) -> None:
+                    """记录LeRobot缓冲区已被重置。"""
+                    self.cleared = delete_images
+
+            writer = LeRobotEpisodeWriter.__new__(LeRobotEpisodeWriter)
+            writer.dataset = FakeDataset()
+            writer.discard_episode()
+
+            self.assertFalse(video_directory.exists())
+            self.assertTrue(writer.dataset.cleared)
+        finally:
+            shutil.rmtree(temporary_directory, ignore_errors=True)
 
     def test_resume_rejects_mismatched_contract(self) -> None:
         """任一不可漂移字段变化都必须拒绝续采。"""

@@ -29,6 +29,116 @@ DATASET_FPS = 20
 CONTRACT_FILENAME = "collector_contract.json"
 
 
+def _quote_ffconcat_path(path: Path) -> str:
+    """转义FFmpeg concat清单中的单引号。
+
+    Args:
+        path: 需要写入concat清单的绝对路径。
+
+    Returns:
+        可安全放入单引号字段的路径文本。
+    """
+    return str(path.resolve()).replace("'", "'\\''")
+
+
+def concatenate_video_files_utf8(
+    input_video_paths: list[Path | str],
+    output_video_path: Path,
+    overwrite: bool = True,
+) -> None:
+    """使用UTF-8 concat清单合并视频，兼容Windows中文路径。
+
+    LeRobot 0.4.4使用系统默认编码写入临时 ``.ffconcat`` 文件，而
+    FFmpeg按UTF-8读取该清单。在中文路径下，从第二个episode开始合并视频
+    时会把路径解码成乱码。本函数保持原有remux语义，只显式锁定UTF-8。
+
+    Args:
+        input_video_paths: 按时间顺序排列的输入视频。
+        output_video_path: 合并后的目标视频。
+        overwrite: 目标存在时是否覆盖。
+
+    Raises:
+        FileExistsError: 目标存在且禁止覆盖时抛出。
+        FileNotFoundError: 输入列表为空或输入文件不存在时抛出。
+    """
+    import av
+
+    output_path = Path(output_video_path)
+    if output_path.exists() and not overwrite:
+        raise FileExistsError(f"视频文件已存在: {output_path}")
+    if not input_video_paths:
+        raise FileNotFoundError("没有可合并的输入视频")
+
+    resolved_inputs = [Path(path).resolve() for path in input_video_paths]
+    missing_inputs = [path for path in resolved_inputs if not path.is_file()]
+    if missing_inputs:
+        raise FileNotFoundError(f"缺少待合并视频: {missing_inputs}")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    concat_path: Path | None = None
+    temporary_output_path: Path | None = None
+    input_container = None
+    output_container = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="\n",
+            suffix=".ffconcat",
+            delete=False,
+        ) as concat_file:
+            concat_file.write("ffconcat version 1.0\n")
+            for input_path in resolved_inputs:
+                concat_file.write(f"file '{_quote_ffconcat_path(input_path)}'\n")
+            concat_path = Path(concat_file.name)
+
+        input_container = av.open(
+            str(concat_path),
+            mode="r",
+            format="concat",
+            options={"safe": "0"},
+        )
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as output_file:
+            temporary_output_path = Path(output_file.name)
+        output_container = av.open(
+            str(temporary_output_path),
+            mode="w",
+            options={"movflags": "faststart"},
+        )
+
+        stream_map = {}
+        for input_stream in input_container.streams:
+            if input_stream.type in ("video", "audio", "subtitle"):
+                output_stream = output_container.add_stream_from_template(
+                    template=input_stream,
+                    opaque=True,
+                )
+                output_stream.time_base = input_stream.time_base
+                stream_map[input_stream.index] = output_stream
+
+        for packet in input_container.demux():
+            if packet.stream.index not in stream_map or packet.dts is None:
+                continue
+            packet.stream = stream_map[packet.stream.index]
+            output_container.mux(packet)
+
+        input_container.close()
+        input_container = None
+        output_container.close()
+        output_container = None
+        shutil.move(str(temporary_output_path), str(output_path))
+        temporary_output_path = None
+    finally:
+        if input_container is not None:
+            input_container.close()
+        if output_container is not None:
+            output_container.close()
+        if concat_path is not None:
+            concat_path.unlink(missing_ok=True)
+        if temporary_output_path is not None:
+            temporary_output_path.unlink(missing_ok=True)
+
+
 def find_ffmpeg() -> Path | None:
     """查找系统或imageio-ffmpeg提供的可执行文件。
 
@@ -357,20 +467,23 @@ class LeRobotEpisodeWriter:
             新保存的episode编号。
         """
         episode_index = self.total_episodes
+        self._validate_pending_episode(frame_count)
         # LeRobot 0.4.4内部直接调用tempfile.mkdtemp；短时替换为权限稳定的
         # 创建函数，避免Windows受管环境生成当前进程不可访问的临时目录。
+        from lerobot.datasets import lerobot_dataset as lerobot_dataset_module
+
         original_mkdtemp = tempfile.mkdtemp
+        original_concatenate = lerobot_dataset_module.concatenate_video_files
         tempfile.mkdtemp = _accessible_mkdtemp
+        lerobot_dataset_module.concatenate_video_files = concatenate_video_files_utf8
         try:
             self.dataset.save_episode(parallel_encoding=False)
         finally:
             tempfile.mkdtemp = original_mkdtemp
+            lerobot_dataset_module.concatenate_video_files = original_concatenate
             for temporary_directory in self.root.glob(".lerobot-encode-*"):
                 if temporary_directory.is_dir():
-                    try:
-                        temporary_directory.rmdir()
-                    except OSError:
-                        pass
+                    shutil.rmtree(temporary_directory, ignore_errors=True)
         self.contract.setdefault("episodes", []).append(
             {
                 "episode_index": episode_index,
@@ -385,8 +498,46 @@ class LeRobotEpisodeWriter:
         self._write_contract()
         return episode_index
 
+    def _validate_pending_episode(self, expected_frame_count: int) -> None:
+        """在落盘前验证状态缓冲和两路相机帧数一致。
+
+        Args:
+            expected_frame_count: 采集状态机记录的当前episode帧数。
+
+        Raises:
+            RuntimeError: 状态缓冲或任一路相机帧数不一致时抛出。
+        """
+        self.dataset._wait_image_writer()
+        buffered_count = int(self.dataset.episode_buffer["size"])
+        if buffered_count != expected_frame_count:
+            raise RuntimeError(
+                "保存前帧数不一致: "
+                f"state_machine={expected_frame_count}, buffer={buffered_count}"
+            )
+
+        episode_index = self.dataset.episode_buffer["episode_index"]
+        for video_key in self.dataset.meta.video_keys:
+            image_directory = self.dataset._get_image_file_dir(episode_index, video_key)
+            image_count = len(list(image_directory.glob("frame-*.png")))
+            if image_count != expected_frame_count:
+                raise RuntimeError(
+                    "保存前相机帧数不一致: "
+                    f"camera={video_key}, expected={expected_frame_count}, actual={image_count}"
+                )
+
     def discard_episode(self) -> None:
-        """删除当前未保存episode的图像和内存缓冲。"""
+        """删除当前未保存episode的两路视频帧和内存缓冲。
+
+        LeRobot 0.4.4的 ``clear_episode_buffer(delete_images=True)`` 只遍历
+        ``image_keys``，不会清理以 ``video`` feature暂存的PNG。本项目两路
+        相机均为video feature，因此需要在重置缓冲前显式删除对应目录。
+        """
+        self.dataset._wait_image_writer()
+        episode_index = self.dataset.episode_buffer["episode_index"]
+        for video_key in self.dataset.meta.video_keys:
+            image_directory = self.dataset._get_image_file_dir(episode_index, video_key)
+            if image_directory.is_dir():
+                shutil.rmtree(image_directory)
         self.dataset.clear_episode_buffer(delete_images=True)
 
     def close(self) -> None:
