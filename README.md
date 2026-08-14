@@ -140,7 +140,9 @@ python -m scripts.verify_act_layout `
 
 ## 云端 SmolVLA 训练（P4）
 
-当前云端目标环境为Ubuntu 24.04、Python 3.11、Tesla T4 15 GiB。依赖锁定为PyTorch 2.7.0/cu126、torchvision 0.22.0、TorchCodec 0.5.0、LeRobot 0.4.4和MuJoCo 3.6.0。云端只负责环境检查与训练；训练完成后的checkpoint下载到本笔记本评测。
+当前云端支持Ubuntu 22.04/24.04和Python 3.10/3.11；原始smoke目标为Tesla T4 15 GiB，AutoDL正式训练使用RTX 4090 24GB。依赖锁定为PyTorch 2.7.0/cu126、torchvision 0.22.0、TorchCodec 0.5.0、LeRobot 0.4.4和MuJoCo 3.6.0。云端只负责环境检查与训练；训练完成后的checkpoint下载到本笔记本评测。
+
+AutoDL RTX 4090使用项目独立`.venv-cloud`的上传、安装和训练命令见[AutoDL独立cu126环境部署](AUTODL独立环境部署.md)。该方案不复用镜像预装的PyTorch/cu130。
 
 ### 必须上传的内容
 
@@ -254,6 +256,8 @@ conda activate smolvla-eval
 ```
 
 入口同时固定场景seed与SmolVLA采样使用的policy seed，每条完成后即时写入JSONL并支持严格断点续跑。输出包含运行manifest、JSONL、CSV、汇总JSON、Markdown报告、视频保留清单和审计视频。完整实验设计、Bootstrap口径、冒烟及预实验命令见[本机模型效果评测文档](evaluate/README.md)。
+
+另提供`configs/eval_seen.yaml`作为已见场景对照：使用训练中出现过的scene seed `0、1、2`，在四类canonical任务和两个policy seed上执行24条rollout。该结果应与正式实验的canonical子集比较，用于观察已见布局与未见布局的差距。
 
 ### 从训练服务器下载checkpoint
 

@@ -98,8 +98,8 @@ class EvaluationContractTests(unittest.TestCase):
         self.assertFalse(args.resume)
 
     def test_config_combination_counts(self) -> None:
-        """基础配置应有12组，正式配置应有240组。"""
-        for filename, expected in (("eval.yaml", 12), ("eval_standard.yaml", 240)):
+        """基础、seen场景和正式配置应分别有12、24和240组。"""
+        for filename, expected in (("eval.yaml", 12), ("eval_seen.yaml", 24), ("eval_standard.yaml", 240)):
             evaluation = load_yaml_config(PROJECT_ROOT / "configs" / filename)["evaluation"]
             specs = build_specs(evaluation)
             self.assertEqual(len(specs), expected)
@@ -108,6 +108,10 @@ class EvaluationContractTests(unittest.TestCase):
         self.assertEqual(standard["max_steps"], 400)
         self.assertEqual(standard["prompt_types"], ["canonical", "synonym", "unseen"])
         self.assertEqual(standard["policy_seeds"], [20260, 20261])
+        seen = load_yaml_config(PROJECT_ROOT / "configs" / "eval_seen.yaml")["evaluation"]
+        self.assertEqual(seen["scene_seeds"], [0, 1, 2])
+        self.assertEqual(seen["prompt_types"], ["canonical"])
+        self.assertEqual(seen["policy_seeds"], standard["policy_seeds"])
 
     def test_checkpoint_locator_accepts_only_complete_model(self) -> None:
         """只有配置、权重和处理器齐全的目录才能用于评测。"""

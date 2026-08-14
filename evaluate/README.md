@@ -58,6 +58,29 @@ pretrained_model/
 └── policy_postprocessor.json
 ```
 
+## 3.1 Seen场景对照实验
+
+`configs/eval_seen.yaml`用于验证新训练模型在训练已见布局中的效果：
+
+```text
+3个训练已见scene seed（0、1、2）
+× 4类任务
+× 1种训练已见canonical措辞
+× 2个policy seed（20260、20261）
+= 24条rollout
+```
+
+这3个scene seed在四类任务的训练示范中都出现过。除场景集合和措辞范围外，评测仍使用与正式实验相同的checkpoint、20 Hz、400步超时、成功条件和policy seed。执行命令：
+
+```powershell
+.\evaluate\run.ps1 `
+  --checkpoint outputs\train\smolvla_ur10e_b8_s15000_r2 `
+  --config configs\eval_seen.yaml `
+  --output-dir outputs\eval\seen_canonical
+```
+
+中断后在同一命令末尾增加`--resume`。分析时只能将seen实验与正式240条结果中的`prompt_type=canonical`子集比较，不能把24条seen结果与包含三种措辞的总体成功率直接相减。该对照用于描述已见布局与未见布局的性能差距，不等同于独立测试集上的泛化结论。
+
 ## 4. 分阶段执行
 
 ### 4.1 自动测试
