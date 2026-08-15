@@ -56,6 +56,30 @@ class SafeAction:
 
     command: NDArray[np.float32]
     clipped: bool
+    clipped_mask: NDArray[np.bool_]
+    clip_amount: NDArray[np.float32]
+
+
+def action_to_vector(action: Any) -> NDArray[np.float64]:
+    """把Tensor或数组动作转换为有限七维向量。
+
+    Args:
+        action: Tensor、数组或七维序列，可带一个batch维。
+
+    Returns:
+        七维float64动作向量。
+
+    Raises:
+        ValueError: 动作shape错误或包含非有限值时抛出。
+    """
+    if hasattr(action, "detach"):
+        action = action.detach().float().cpu().numpy()
+    vector = np.asarray(action, dtype=np.float64).squeeze()
+    if vector.shape != (7,):
+        raise ValueError(f"策略动作必须是七维，实际 shape={vector.shape}")
+    if not np.isfinite(vector).all():
+        raise ValueError("策略动作包含 NaN 或无穷值")
+    return vector
 
 
 def convert_policy_action(action: Any, arm_ctrlrange: NDArray[np.floating]) -> SafeAction:
@@ -68,22 +92,22 @@ def convert_policy_action(action: Any, arm_ctrlrange: NDArray[np.floating]) -> S
     Returns:
         可执行动作及是否发生裁剪。
     """
-    if hasattr(action, "detach"):
-        action = action.detach().cpu().numpy()
-    vector = np.asarray(action, dtype=np.float64).squeeze()
+    vector = action_to_vector(action)
     ranges = np.asarray(arm_ctrlrange, dtype=np.float64)
-    if vector.shape != (7,):
-        raise ValueError(f"策略动作必须是七维，实际 shape={vector.shape}")
     if ranges.shape != (6, 2) or not np.isfinite(ranges).all():
         raise ValueError(f"机械臂控制范围必须是有限 (6, 2)，实际 shape={ranges.shape}")
-    if not np.isfinite(vector).all():
-        raise ValueError("策略动作包含 NaN 或无穷值")
 
     limited = vector.copy()
     limited[:6] = np.clip(limited[:6], ranges[:, 0], ranges[:, 1])
     limited[6] = np.clip(limited[6], 0.0, 1.0)
-    clipped = not np.allclose(vector, limited, rtol=0.0, atol=1e-7)
-    return SafeAction(limited.astype(np.float32), clipped)
+    clipped_mask = ~np.isclose(vector, limited, rtol=0.0, atol=1e-7)
+    clip_amount = vector - limited
+    return SafeAction(
+        command=limited.astype(np.float32),
+        clipped=bool(clipped_mask.any()),
+        clipped_mask=clipped_mask,
+        clip_amount=clip_amount.astype(np.float32),
+    )
 
 
 def find_pretrained_model(path: Path) -> Path:

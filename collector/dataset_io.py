@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.metadata
 import json
+import os
 import shutil
 import tempfile
 import uuid
@@ -182,6 +183,31 @@ def _accessible_mkdtemp(
     return str(temporary_directory)
 
 
+def configure_hf_datasets_cache(cache_root: Path) -> Path:
+    """把Hugging Face Datasets缓存固定到项目可写目录。
+
+    Windows受管环境可能拒绝在用户级 ``.cache`` 下创建Parquet锁文件，导致
+    已经完整落盘的LeRobot数据无法重新读取。该函数同时设置环境变量和已经
+    导入的 ``datasets.config``，保证当前进程后续读取使用项目缓存。
+
+    Args:
+        cache_root: 本任务专用缓存目录。
+
+    Returns:
+        已创建的缓存目录绝对路径。
+    """
+    resolved = cache_root.resolve()
+    resolved.mkdir(parents=True, exist_ok=True)
+    os.environ["HF_DATASETS_CACHE"] = str(resolved)
+    try:
+        from datasets import config as datasets_config
+
+        datasets_config.HF_DATASETS_CACHE = str(resolved)
+    except ImportError:
+        pass
+    return resolved
+
+
 def dataset_features() -> dict[str, dict[str, Any]]:
     """返回训练数据集的唯一feature schema。
 
@@ -253,16 +279,25 @@ def _json_schema() -> dict[str, dict[str, Any]]:
     }
 
 
-def expected_contract() -> dict[str, Any]:
+def expected_contract(
+    dataset_version: str = DATASET_VERSION,
+    repo_id: str = DATASET_REPO_ID,
+    extras: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """构造本版本数据集不可漂移的契约字段。
+
+    Args:
+        dataset_version: 数据集版本标识，默认保持旧v1值。
+        repo_id: LeRobot仓库身份，默认保持旧v1值。
+        extras: 不得覆盖基础字段的独立扩展契约。
 
     Returns:
         不包含动态episode记录的契约字典。
     """
     pad_positions = dict(TASK_INITIAL_BODY_POSITIONS)
-    return {
-        "dataset_version": DATASET_VERSION,
-        "repo_id": DATASET_REPO_ID,
+    contract = {
+        "dataset_version": dataset_version,
+        "repo_id": repo_id,
         "fps": DATASET_FPS,
         "lerobot_version": importlib.metadata.version("lerobot"),
         "features": _json_schema(),
@@ -276,30 +311,51 @@ def expected_contract() -> dict[str, Any]:
             "yellow": list(pad_positions["task_yellow_pad"]),
         },
     }
+    if extras:
+        overlap = set(contract).intersection(extras)
+        if overlap:
+            raise ValueError(f"扩展契约不得覆盖基础字段: {sorted(overlap)}")
+        contract.update(extras)
+    return contract
 
 
-def contract_mismatches(actual: dict[str, Any]) -> list[str]:
+def contract_mismatches(
+    actual: dict[str, Any],
+    expected: dict[str, Any] | None = None,
+) -> list[str]:
     """比较已有契约与当前版本的不可漂移字段。
 
     Args:
         actual: 从已有数据集读取的完整契约。
+        expected: 可选的目标契约；为空时使用旧v1默认契约。
 
     Returns:
         所有不一致或缺失的字段名。
     """
-    expected = expected_contract()
-    return [key for key, value in expected.items() if actual.get(key) != value]
+    target = expected or expected_contract()
+    return [key for key, value in target.items() if actual.get(key) != value]
 
 
 class LeRobotEpisodeWriter:
     """安全创建、续采和保存SmolVLA专家episode。"""
 
-    def __init__(self, root: Path, resume: bool = False) -> None:
+    def __init__(
+        self,
+        root: Path,
+        resume: bool = False,
+        *,
+        dataset_version: str = DATASET_VERSION,
+        repo_id: str = DATASET_REPO_ID,
+        contract_extras: dict[str, Any] | None = None,
+    ) -> None:
         """创建新数据集或严格校验后续采。
 
         Args:
             root: LeRobot数据集根目录。
             resume: 是否允许在已有目录上追加。
+            dataset_version: 当前写入器的数据集版本，默认保持旧v1值。
+            repo_id: 当前写入器的LeRobot仓库身份，默认保持旧v1值。
+            contract_extras: 队列键等不可覆盖基础字段的扩展契约。
 
         Raises:
             FileExistsError: 目录已存在但未显式续采时抛出。
@@ -314,8 +370,12 @@ class LeRobotEpisodeWriter:
             raise RuntimeError(f"LeRobot导入失败，请检查采集环境: {exc}") from exc
 
         self.root = root.resolve()
+        self.dataset_version = dataset_version
+        self.repo_id = repo_id
+        self.contract_extras = dict(contract_extras or {})
         self.contract_path = self.root / "meta" / CONTRACT_FILENAME
-        self.contract = expected_contract()
+        self.expected_contract = expected_contract(dataset_version, repo_id, self.contract_extras)
+        self.contract = dict(self.expected_contract)
         if self.root.exists():
             if not resume:
                 raise FileExistsError(f"数据目录已存在；如需续采请显式添加 --resume: {self.root}")
@@ -323,11 +383,11 @@ class LeRobotEpisodeWriter:
             if self._is_recoverable_empty_dataset():
                 shutil.rmtree(self.root)
                 self.dataset = self._create_dataset(LeRobotDataset)
-                self.contract = {**expected_contract(), "episodes": []}
+                self.contract = {**self.expected_contract, "episodes": []}
                 self._write_contract()
             else:
                 self.dataset = LeRobotDataset(
-                    DATASET_REPO_ID,
+                    self.repo_id,
                     root=self.root,
                     video_backend="pyav",
                     vcodec="h264",
@@ -353,7 +413,7 @@ class LeRobotEpisodeWriter:
             可写入episode的新数据集实例。
         """
         return dataset_class.create(
-            repo_id=DATASET_REPO_ID,
+            repo_id=self.repo_id,
             root=self.root,
             robot_type="ur10e_mujoco",
             fps=DATASET_FPS,
@@ -549,7 +609,7 @@ class LeRobotEpisodeWriter:
         if not self.contract_path.is_file():
             raise ValueError(f"续采目录缺少契约文件: {self.contract_path}")
         actual = json.loads(self.contract_path.read_text(encoding="utf-8"))
-        mismatches = contract_mismatches(actual)
+        mismatches = contract_mismatches(actual, self.expected_contract)
         if mismatches:
             raise ValueError(f"续采数据契约不匹配: {mismatches}")
         self.contract = actual

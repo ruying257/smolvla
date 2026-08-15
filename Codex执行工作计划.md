@@ -18,8 +18,8 @@
 | 模型 | 仅微调 `lerobot/smolvla_base`，不做 ACT 性能对比 |
 | 任务 | 红/绿积木放到蓝/黄长方形底板，共 4 类英文组合指令 |
 | 数据 | 至少 80 条专家示范；本机采集、回放和质检后再上传 |
-| 评测 | 本机`smolvla-eval`执行；10个未见scene seed x 4类任务 x 3种措辞 x 2个policy seed，共240次rollout |
-| Seen场景对照 | 使用训练已见seed 0、1、2，执行4类canonical任务 x 2个policy seed，共24次rollout；只与正式结果的canonical子集比较 |
+| 评测 | 本机`smolvla-eval`执行；10个未见scene seed x 4类任务 x 3种措辞 x 固定policy seed 20260，共120次rollout |
+| Seen场景对照 | 使用训练已见seed 0-5，执行4类canonical任务 x 固定policy seed 20260，共24次rollout；只与正式结果的canonical子集比较 |
 | 采样规格 | 20 Hz；第三方与腕部两路 RGB 均为 256 x 256 |
 | 观测状态 | 7 维：6 个当前关节角 + 1 个当前夹爪状态 |
 | 策略动作 | 7 维：6 个绝对关节目标角 + 1 个夹爪指令 |
@@ -226,7 +226,7 @@ Put the green cube on the yellow pad.
 - 手工传输经 P3 打包和校验的数据归档至云端；先运行校验脚本。
 - 在 24GB 级 GPU 上从 `smolvla_base` 微调。先采用小 batch、梯度累积和保守的模块冻结策略；精确参数由 P4 smoke test 决定。
 - 保存数据版本、训练配置、随机 seed、checkpoint、日志和 rollout 视频。
-- 下载完整checkpoint，在本机使用10个未训练scene seed、4类任务、canonical/synonym/unseen三种措辞和2个policy seed执行240次闭环rollout。
+- 下载完整checkpoint，在本机使用10个未训练scene seed、4类任务、canonical/synonym/unseen三种措辞和固定`policy_seed=20260`执行120次闭环rollout。
 - 每条最多400步；同时固定scene seed与Flow Matching采样使用的policy seed。
 - 每条结果即时写入JSONL并支持manifest严格校验的断点续跑；正式结果使用scene分层Bootstrap计算95%置信区间。
 
@@ -240,7 +240,7 @@ Put the green cube on the yellow pad.
 
 ### 完成与效果判定
 
-- 首版不预设人为成功率硬指标，以固定矩阵上的240次评测建立真实基线。
+- 首版不预设人为成功率硬指标，以固定矩阵上的120次评测建立真实基线。
 - 数据、训练、checkpoint 重载和闭环评测链路完整可复现时，可判定工程链路完成；如果策略成功率较低，不得表述为策略效果达标。
 - 策略效果不足时，根据分任务指标和失败分类进行一轮有边界的补采或调参，不得通过改变成功判定、scene seed 或统计口径制造更高成功率。
 

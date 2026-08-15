@@ -26,8 +26,10 @@ from evaluate.rollout import (
     load_jsonl,
     prepare_run,
     retain_videos,
+    resolve_execution_horizon,
     run_single_rollout,
     set_policy_seed,
+    summarize_action_clipping,
     summarize_results,
     write_results,
 )
@@ -79,6 +81,7 @@ def fake_result(
         latency_p95_ms=12.0,
         clipped_action_steps=20,
         clipped_action_rate=0.1 if success else 0.05,
+        action_trace_path="",
         checkpoint_sha256="abc",
         video_path=str(video),
         video_retained=True,
@@ -96,10 +99,23 @@ class EvaluationContractTests(unittest.TestCase):
         self.assertEqual(args.config, PROJECT_ROOT / "configs" / "eval.yaml")
         self.assertEqual(args.device, "cuda")
         self.assertFalse(args.resume)
+        self.assertIsNone(args.execution_horizon)
+
+    def test_execution_horizon_uses_cli_override_and_validates_chunk_size(self) -> None:
+        """执行步数应支持命令行覆盖且不能超过模型chunk长度。"""
+        with workspace_temp_dir() as output:
+            (output / "config.json").write_text(
+                json.dumps({"chunk_size": 50, "n_action_steps": 50}),
+                encoding="utf-8",
+            )
+            self.assertEqual(resolve_execution_horizon(output, {}, 10), (10, 50))
+            self.assertEqual(resolve_execution_horizon(output, {"execution_horizon": 20}, None), (20, 50))
+            with self.assertRaisesRegex(ValueError, "chunk_size"):
+                resolve_execution_horizon(output, {}, 51)
 
     def test_config_combination_counts(self) -> None:
-        """基础、seen场景和正式配置应分别有12、24和240组。"""
-        for filename, expected in (("eval.yaml", 12), ("eval_seen.yaml", 24), ("eval_standard.yaml", 240)):
+        """基础、seen场景和正式配置应分别有12、24和120组。"""
+        for filename, expected in (("eval.yaml", 12), ("eval_seen.yaml", 24), ("eval_standard.yaml", 120)):
             evaluation = load_yaml_config(PROJECT_ROOT / "configs" / filename)["evaluation"]
             specs = build_specs(evaluation)
             self.assertEqual(len(specs), expected)
@@ -107,11 +123,11 @@ class EvaluationContractTests(unittest.TestCase):
         standard = load_yaml_config(PROJECT_ROOT / "configs" / "eval_standard.yaml")["evaluation"]
         self.assertEqual(standard["max_steps"], 400)
         self.assertEqual(standard["prompt_types"], ["canonical", "synonym", "unseen"])
-        self.assertEqual(standard["policy_seeds"], [20260, 20261])
+        self.assertEqual(standard["policy_seeds"], [20260])
         seen = load_yaml_config(PROJECT_ROOT / "configs" / "eval_seen.yaml")["evaluation"]
-        self.assertEqual(seen["scene_seeds"], [0, 1, 2])
+        self.assertEqual(seen["scene_seeds"], [0, 1, 2, 3, 4, 5])
         self.assertEqual(seen["prompt_types"], ["canonical"])
-        self.assertEqual(seen["policy_seeds"], standard["policy_seeds"])
+        self.assertEqual(seen["policy_seeds"], [20260])
 
     def test_checkpoint_locator_accepts_only_complete_model(self) -> None:
         """只有配置、权重和处理器齐全的目录才能用于评测。"""
@@ -133,6 +149,8 @@ class EvaluationContractTests(unittest.TestCase):
         safe = convert_policy_action(np.asarray([[2.0, 0, 0, 0, 0, 0, -0.2]]), ranges)
         self.assertTrue(safe.clipped)
         np.testing.assert_allclose(safe.command, [1.0, 0, 0, 0, 0, 0, 0])
+        np.testing.assert_array_equal(safe.clipped_mask, [True, False, False, False, False, False, True])
+        np.testing.assert_allclose(safe.clip_amount, [1.0, 0, 0, 0, 0, 0, -0.2])
         with self.assertRaises(ValueError):
             convert_policy_action(np.zeros(6), ranges)
         with self.assertRaises(ValueError):
@@ -187,15 +205,25 @@ class LocalRolloutTests(unittest.TestCase):
                 max_steps=2,
                 device="cpu",
                 checkpoint_sha256="abc",
+                execution_horizon=1,
             )
             self.assertEqual(result.rollout_key, spec.key)
             self.assertEqual(result.policy_seed, 20260)
             self.assertEqual(result.failure_mode, "timeout")
             self.assertEqual(result.error, "")
             self.assertGreater(Path(result.video_path).stat().st_size, 0)
+            trace_lines = Path(result.action_trace_path).read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(trace_lines), 2)
+            first_trace = json.loads(trace_lines[0])
+            self.assertEqual(first_trace["model_output"], first_trace["physical_action"])
+            self.assertEqual(first_trace["physical_action"], first_trace["executed_action"])
+            self.assertTrue(first_trace["chunk_start"])
             summary = write_results(output, [result])
             self.assertEqual(summary["rollouts"], 1)
+            self.assertEqual(summary["action_clipping"]["trace_steps"], 2)
             self.assertTrue((output / "rollouts.csv").is_file())
+            self.assertTrue((output / "action_clipping_summary.json").is_file())
+            self.assertTrue((output / "action_clipping_by_dimension.csv").is_file())
 
 
 class ResumeAndStatisticsTests(unittest.TestCase):
@@ -248,6 +276,39 @@ class ResumeAndStatisticsTests(unittest.TestCase):
             self.assertEqual(summary["stability"]["stable_failure_0_of_2"], 1)
             self.assertEqual(len(bootstrap_success_ci(results, repeats=100)), 2)
             self.assertIn("language_generalization_gap", summary)
+
+    def test_action_clipping_summary_finds_most_frequent_dimension(self) -> None:
+        """逐维汇总应识别裁剪次数最多的关节。"""
+        with workspace_temp_dir() as output:
+            result = fake_result(output, 1, 10, "red_on_blue", "canonical", False)
+            result.steps = 2
+            trace = output / "trace.jsonl"
+            base = {
+                "rollout_key": result.rollout_key,
+                "action_lower": [-1.0] * 6 + [0.0],
+                "action_upper": [1.0] * 7,
+            }
+            records = [
+                {
+                    **base,
+                    "clipped_mask": [False, False, True, False, False, False, True],
+                    "clip_amount": [0.0, 0.0, 0.2, 0.0, 0.0, 0.0, 0.1],
+                },
+                {
+                    **base,
+                    "clipped_mask": [False, False, True, False, False, False, False],
+                    "clip_amount": [0.0, 0.0, 0.3, 0.0, 0.0, 0.0, 0.0],
+                },
+            ]
+            trace.write_text(
+                "\n".join(json.dumps(record) for record in records) + "\n",
+                encoding="utf-8",
+            )
+            result.action_trace_path = str(trace)
+            clipping = summarize_action_clipping([result])
+            self.assertEqual(clipping["most_frequently_clipped_dimensions"], ["elbow"])
+            self.assertEqual(clipping["clipped_trace_step_rate"], 1.0)
+            self.assertEqual(clipping["clipped_action_elements"], 3)
 
     def test_video_retention_keeps_failures_and_one_success_per_group(self) -> None:
         """每组只保留首条成功视频，所有失败视频必须保留。"""

@@ -13,3 +13,18 @@ smolvla-data/
 *.zip
 evaluate/
 collector/
+
+# collector目录历史上整体忽略，仅允许纳入Grounding v2新增入口。
+!collector/
+collector/*
+!collector/collect_matrix.py
+!collector/collection_plan.py
+!collector/validate_grounding_dataset.py
+!collector/build_review_montages.py
+
+# evaluate目录历史上整体忽略，仅允许纳入独立诊断入口。
+!evaluate/
+evaluate/*
+!evaluate/diagnose_language.py
+!evaluate/diagnose_conditioning.py
+!evaluate/diagnose_visual_counterfactual.py

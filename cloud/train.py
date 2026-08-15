@@ -12,17 +12,17 @@ from cloud.common import PROJECT_ROOT, format_command, load_yaml_config, resolve
 
 def build_parser() -> argparse.ArgumentParser:
     """创建训练命令行解析器。"""
-    parser = argparse.ArgumentParser(description="启动 SmolVLA 云端训练")
+    parser = argparse.ArgumentParser(description="启动 SmolVLA 云端训练 v2")
     parser.add_argument(
         "--dataset-root",
         type=Path,
-        default=PROJECT_ROOT / "smolvla-data" / "smolvla_ur10e",
-        help="完整 LeRobot 数据集目录，默认使用项目内 smolvla-data/smolvla_ur10e",
+        default=PROJECT_ROOT / "smolvla-data" / "smolvla_ur10e_grounding_v2",
+        help="完整 LeRobot 数据集目录，默认使用项目内 smolvla-data/smolvla_ur10e_grounding_v2",
     )
     parser.add_argument(
         "--config",
         type=Path,
-        default=PROJECT_ROOT / "configs" / "cloud_train.yaml",
+        default=PROJECT_ROOT / "configs" / "cloud_train_Tencent.yaml",
         help="训练 YAML 配置",
     )
     parser.add_argument("--output-dir", type=Path, help="覆盖配置中的训练输出目录")
@@ -43,7 +43,7 @@ def build_train_command(
     """构造不经过 shell 插值的 LeRobot 训练参数列表。
 
     Args:
-        config: ``cloud_train.yaml`` 配置。
+        config: ``cloud_train_Tencent.yaml`` 配置。
         dataset_root: 完整 LeRobot 数据集目录。
         output_dir: 本次训练输出目录，调用前不得存在。
         job_name: LeRobot 任务名称。
@@ -68,7 +68,7 @@ def build_train_command(
         f"--policy.device={policy.get('device', 'cuda')}",
         f"--policy.use_amp={_bool_text(policy.get('use_amp', True))}",
         "--policy.push_to_hub=false",
-        f"--dataset.repo_id={dataset.get('repo_id', 'smolvla_ur10e')}",
+        f"--dataset.repo_id={dataset.get('repo_id', 'smolvla_ur10e_grounding_v2')}",
         f"--dataset.root={dataset_root}",
         f"--dataset.video_backend={dataset.get('video_backend', 'pyav')}",
         f"--batch_size={batch_size}",
@@ -116,8 +116,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise FileNotFoundError(f"数据集目录不存在: {dataset_root}")
 
     train = _mapping(config, "train")
-    output_dir = resolve_path(args.output_dir or train.get("output_dir", "outputs/train/smolvla"))
-    job_name = args.job_name or str(train.get("job_name", "smolvla_ur10e"))
+    output_dir = resolve_path(args.output_dir or train.get("output_dir", "outputs/train/smolvla_ur10e_grounding_v2"))
+    job_name = args.job_name or str(train.get("job_name", "smolvla_ur10e_grounding_v2"))    
     if output_dir.exists() and not args.dry_run:
         raise FileExistsError(f"训练输出目录已存在，避免覆盖: {output_dir}")
 

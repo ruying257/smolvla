@@ -63,11 +63,20 @@ python view_scene.py --scene-seed 7
 
 ## 采集专家数据
 
+颜色Grounding v2采用20个全共享scene、四任务canonical反事实配对和逐scene
+Latin square采集，不再用下面的v1单任务追加命令。完整pilot、恢复、局部重采、
+蒙太奇复核及最终验收命令见[Grounding v2数据采集与验收](Grounding_v2数据采集与验收.md)。
+
+原80条数据集在本机保留为 `smolvla-data/smolvla_ur10e_v1`，其内部
+`repo_id=smolvla_ur10e` 和 `dataset_version=smolvla_ur10e_v1` 不变。
+
+### v1旧采集入口
+
 采集一条红积木到蓝色区域的episode：
 
 ```powershell
 python -m collector.collect `
-  --root smolvla-data\smolvla_ur10e `
+  --root smolvla-data\smolvla_ur10e_v1 `
   --task red_on_blue `
   --seed 0 `
   --episodes 1
@@ -77,7 +86,7 @@ python -m collector.collect `
 
 ```powershell
 python -m collector.collect `
-  --root smolvla-data\smolvla_ur10e `
+  --root smolvla-data\smolvla_ur10e_v1 `
   --task green_on_yellow `
   --seeds 3,7,11 `
   --episodes 3 `
@@ -103,7 +112,7 @@ python -m collector.collect `
 回放第0条episode：
 
 ```powershell
-python -m collector.replay --root smolvla-data\smolvla_ur10e --episode-index 0
+python -m collector.replay --root smolvla-data\smolvla_ur10e_v1 --episode-index 0
 ```
 
 回放窗口同步显示第三方和腕部视频，以及任务、seed、7维状态和7维动作。空格暂停，左右方向键逐帧，`Q`或`Esc`退出；回放不会创建MuJoCo环境。
@@ -244,7 +253,7 @@ bash scripts/train.sh \
 
 ## 本机 SmolVLA 闭环评测
 
-评测固定在本笔记本的`smolvla-eval` Conda环境执行。正式矩阵为10个未见场景、4类任务、canonical/synonym/unseen三种措辞和2个policy seed，共240条；每条最多400步。评测代码和PowerShell入口统一位于`evaluate/`，YAML配置保留在`configs/`。
+评测固定在本笔记本的`smolvla-eval` Conda环境执行。正式矩阵为10个未见场景、4类任务、canonical/synonym/unseen三种措辞和固定`policy_seed=20260`，共120条；每条最多400步。评测代码和PowerShell入口统一位于`evaluate/`，YAML配置保留在`configs/`。
 
 ```powershell
 conda activate smolvla-eval
@@ -255,9 +264,9 @@ conda activate smolvla-eval
   --resume
 ```
 
-入口同时固定场景seed与SmolVLA采样使用的policy seed，每条完成后即时写入JSONL并支持严格断点续跑。输出包含运行manifest、JSONL、CSV、汇总JSON、Markdown报告、视频保留清单和审计视频。完整实验设计、Bootstrap口径、冒烟及预实验命令见[本机模型效果评测文档](evaluate/README.md)。
+入口同时固定场景seed与SmolVLA采样使用的policy seed，每条完成后即时写入JSONL并支持严格断点续跑。支持通过`--execution-horizon 10`执行“预测50步、只执行前10步后重规划”的Receding Horizon诊断。输出包含运行manifest、逐步动作日志、逐维动作裁剪统计、JSONL、CSV、汇总JSON、Markdown报告、视频保留清单和审计视频。完整实验设计、Bootstrap口径、冒烟及预实验命令见[本机模型效果评测文档](evaluate/README.md)。
 
-另提供`configs/eval_seen.yaml`作为已见场景对照：使用训练中出现过的scene seed `0、1、2`，在四类canonical任务和两个policy seed上执行24条rollout。该结果应与正式实验的canonical子集比较，用于观察已见布局与未见布局的差距。
+另提供`configs/eval_seen.yaml`作为已见场景对照：使用训练中出现过的scene seed `0-5`，在四类canonical任务和固定`policy_seed=20260`上执行24条rollout。该结果应与正式实验的canonical子集比较，用于观察已见布局与未见布局的差距。
 
 ### 从训练服务器下载checkpoint
 

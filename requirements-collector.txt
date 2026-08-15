@@ -6,3 +6,4 @@ pillow>=12.0.0
 opencv-python>=4.11,<5
 av>=14,<16
 imageio-ffmpeg>=0.5,<1
+PyYAML>=6,<7

@@ -24,6 +24,7 @@ import numpy as np
 from collector.task_spec import TASKS
 from evaluate.common import (
     PROJECT_ROOT,
+    action_to_vector,
     convert_policy_action,
     find_pretrained_model,
     load_yaml_config,
@@ -37,6 +38,18 @@ from sim.environment import CleanTabletopEnv
 UNSEEN_TEMPLATE = "Move the {cube_color} cube to the {pad_color} pad."
 RESULTS_JSONL = "rollouts.jsonl"
 MANIFEST_JSON = "run_manifest.json"
+ACTION_TRACE_DIR = "action_traces"
+ACTION_CLIPPING_JSON = "action_clipping_summary.json"
+ACTION_CLIPPING_CSV = "action_clipping_by_dimension.csv"
+ACTION_DIMENSIONS = (
+    "shoulder_pan",
+    "shoulder_lift",
+    "elbow",
+    "wrist_1",
+    "wrist_2",
+    "wrist_3",
+    "gripper",
+)
 
 
 @dataclass(frozen=True)
@@ -72,6 +85,7 @@ class RolloutResult:
     latency_p95_ms: float
     clipped_action_steps: int
     clipped_action_rate: float
+    action_trace_path: str
     checkpoint_sha256: str
     video_path: str
     video_retained: bool
@@ -93,6 +107,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default="cuda", help="策略推理设备")
     parser.add_argument("--max-rollouts", type=int, help="只执行前 N 条 rollout，用于 smoke test")
     parser.add_argument("--max-steps", type=int, help="覆盖每条 rollout 的最大控制步数")
+    parser.add_argument(
+        "--execution-horizon",
+        type=int,
+        help="每个动作chunk实际执行的步数；例如10表示预测50步但只执行前10步后重规划",
+    )
     parser.add_argument("--resume", action="store_true", help="校验manifest后续跑未完成或异常轨迹")
     parser.add_argument("--keep-all-videos", action="store_true", help="保留全部成功与失败视频")
     return parser
@@ -161,14 +180,63 @@ def make_policy_observation(images: dict[str, np.ndarray], state: np.ndarray, ta
     return observation
 
 
-def load_policy_bundle(checkpoint: Path, device: str) -> tuple[Any, Callable[[Any], Any], Callable[[Any], Any]]:
-    """加载checkpoint策略及其预处理和后处理流水线。"""
+def resolve_execution_horizon(
+    checkpoint: Path,
+    evaluation: dict[str, Any],
+    cli_value: int | None,
+) -> tuple[int, int]:
+    """确定动作chunk长度和本次实际执行步数。
+
+    Args:
+        checkpoint: 完整pretrained_model目录。
+        evaluation: YAML中的evaluation配置段。
+        cli_value: 命令行覆盖值，未提供时为None。
+
+    Returns:
+        ``(execution_horizon, chunk_size)``。
+
+    Raises:
+        ValueError: 步数不是正数或超过模型chunk长度时抛出。
+    """
+    policy_config = json.loads((checkpoint / "config.json").read_text(encoding="utf-8"))
+    chunk_size = int(policy_config.get("chunk_size", 1))
+    checkpoint_horizon = int(policy_config.get("n_action_steps", chunk_size))
+    configured = evaluation.get("execution_horizon", checkpoint_horizon)
+    execution_horizon = int(cli_value if cli_value is not None else configured)
+    if execution_horizon <= 0:
+        raise ValueError("execution-horizon必须大于零")
+    if execution_horizon > chunk_size:
+        raise ValueError(
+            f"execution-horizon不能超过模型chunk_size: {execution_horizon} > {chunk_size}"
+        )
+    return execution_horizon, chunk_size
+
+
+def load_policy_bundle(
+    checkpoint: Path,
+    device: str,
+    execution_horizon: int,
+) -> tuple[Any, Callable[[Any], Any], Callable[[Any], Any]]:
+    """加载checkpoint策略并覆盖实际执行的动作步数。
+
+    Args:
+        checkpoint: 完整pretrained_model目录。
+        device: 策略推理设备。
+        execution_horizon: 每次动作chunk实际放入执行队列的步数。
+
+    Returns:
+        策略、输入预处理器和动作后处理器。
+    """
     from lerobot.configs.policies import PreTrainedConfig
     from lerobot.policies.factory import get_policy_class, make_pre_post_processors
 
     config = PreTrainedConfig.from_pretrained(
         str(checkpoint),
-        cli_overrides=[f"--device={device}", "--push_to_hub=false"],
+        cli_overrides=[
+            f"--device={device}",
+            "--push_to_hub=false",
+            f"--n_action_steps={execution_horizon}",
+        ],
     )
     policy_class = get_policy_class(config.type)
     policy = policy_class.from_pretrained(str(checkpoint), config=config)
@@ -178,6 +246,22 @@ def load_policy_bundle(checkpoint: Path, device: str) -> tuple[Any, Callable[[An
         preprocessor_overrides={"device_processor": {"device": device}},
     )
     return policy, preprocessor, postprocessor
+
+
+def rollout_artifact_stem(spec: RolloutSpec) -> str:
+    """生成视频和动作日志共用的稳定文件名。"""
+    return f"scene_{spec.scene_seed}_policy_{spec.policy_seed}_{spec.task_id}_{spec.prompt_type}"
+
+
+def write_action_trace_record(file: Any, record: dict[str, Any]) -> None:
+    """立即追加并刷新一条动作诊断记录。
+
+    Args:
+        file: 已打开的JSONL文本文件。
+        record: 当前控制步的动作、限位和裁剪信息。
+    """
+    file.write(json.dumps(record, ensure_ascii=False) + "\n")
+    file.flush()
 
 
 def run_single_rollout(
@@ -190,6 +274,7 @@ def run_single_rollout(
     max_steps: int,
     device: str,
     checkpoint_sha256: str,
+    execution_horizon: int = 50,
 ) -> RolloutResult:
     """执行一条固定场景和模型随机种子的闭环rollout。
 
@@ -203,6 +288,7 @@ def run_single_rollout(
         max_steps: 单条rollout最大控制步数。
         device: 策略推理设备。
         checkpoint_sha256: 模型权重SHA-256。
+        execution_horizon: 每个预测chunk实际执行的步数。
 
     Returns:
         单条闭环评测结果。
@@ -211,10 +297,11 @@ def run_single_rollout(
 
     task_text = build_prompt(spec.task_id, spec.prompt_type)
     output_dir.mkdir(parents=True, exist_ok=True)
-    video_path = output_dir / "videos" / (
-        f"scene_{spec.scene_seed}_policy_{spec.policy_seed}_{spec.task_id}_{spec.prompt_type}.mp4"
-    )
+    artifact_stem = rollout_artifact_stem(spec)
+    video_path = output_dir / "videos" / f"{artifact_stem}.mp4"
+    action_trace_path = output_dir / ACTION_TRACE_DIR / f"{artifact_stem}.jsonl"
     video_path.parent.mkdir(parents=True, exist_ok=True)
+    action_trace_path.parent.mkdir(parents=True, exist_ok=True)
     latencies: list[float] = []
     clipped_steps = 0
     failure_mode = "timeout"
@@ -224,20 +311,32 @@ def run_single_rollout(
 
     try:
         set_policy_seed(spec.policy_seed)
+        if execution_horizon <= 0:
+            raise ValueError("execution_horizon必须大于零")
+        if hasattr(policy.config, "n_action_steps"):
+            chunk_size = int(getattr(policy.config, "chunk_size", execution_horizon))
+            if execution_horizon > chunk_size:
+                raise ValueError(
+                    f"execution_horizon不能超过模型chunk_size: {execution_horizon} > {chunk_size}"
+                )
+            policy.config.n_action_steps = execution_horizon
         with CleanTabletopEnv() as env, imageio.get_writer(
             video_path,
             fps=fps,
             codec="libx264",
             quality=7,
             macro_block_size=None,
-        ) as writer:
+        ) as writer, action_trace_path.open("w", encoding="utf-8", newline="\n") as trace_file:
             env.reset(spec.scene_seed)
             policy.reset()
             physics_steps = max(1, round((1.0 / fps) / float(env.model.opt.timestep)))
+            action_lower = np.concatenate([env.model.actuator_ctrlrange[:6, 0], [0.0]])
+            action_upper = np.concatenate([env.model.actuator_ctrlrange[:6, 1], [1.0]])
             for step_index in range(max_steps):
                 images = env.capture_training_images()
                 writer.append_data(np.concatenate([images["agent"], images["wrist"]], axis=1))
-                observation = make_policy_observation(images, env.get_state(), task_text)
+                observation_state = env.get_state()
+                observation = make_policy_observation(images, observation_state, task_text)
                 started = time.perf_counter()
                 processed = preprocessor(observation)
                 autocast_context = (
@@ -246,11 +345,30 @@ def run_single_rollout(
                     else nullcontext()
                 )
                 with torch.inference_mode(), autocast_context:
-                    raw_action = policy.select_action(processed)
-                raw_action = postprocessor(raw_action)
+                    model_output = policy.select_action(processed)
+                model_output_vector = action_to_vector(model_output)
+                physical_action = postprocessor(model_output)
                 latencies.append((time.perf_counter() - started) * 1000.0)
-                safe_action = convert_policy_action(raw_action, env.model.actuator_ctrlrange[:6])
+                physical_action_vector = action_to_vector(physical_action)
+                safe_action = convert_policy_action(physical_action_vector, env.model.actuator_ctrlrange[:6])
                 clipped_steps += int(safe_action.clipped)
+                write_action_trace_record(
+                    trace_file,
+                    {
+                        "rollout_key": spec.key,
+                        "step": step_index + 1,
+                        "chunk_start": step_index % execution_horizon == 0,
+                        "model_output": model_output_vector.tolist(),
+                        "physical_action": physical_action_vector.tolist(),
+                        "executed_action": safe_action.command.astype(np.float64).tolist(),
+                        "action_lower": action_lower.astype(np.float64).tolist(),
+                        "action_upper": action_upper.astype(np.float64).tolist(),
+                        "clipped_mask": safe_action.clipped_mask.tolist(),
+                        "clip_amount": safe_action.clip_amount.astype(np.float64).tolist(),
+                        "any_clipped": safe_action.clipped,
+                        "observation_state": np.asarray(observation_state, dtype=np.float64).tolist(),
+                    },
+                )
                 env.apply_joint_action(safe_action.command, physics_steps=physics_steps)
                 completed_steps = step_index + 1
                 evaluation = env.evaluate_task(spec.task_id, completed_steps / fps, max_steps / fps)
@@ -284,6 +402,7 @@ def run_single_rollout(
         latency_p95_ms=percentile(latencies, 95),
         clipped_action_steps=clipped_steps,
         clipped_action_rate=clipped_steps / completed_steps if completed_steps else 0.0,
+        action_trace_path=str(action_trace_path.resolve()),
         checkpoint_sha256=checkpoint_sha256,
         video_path=str(video_path.resolve()),
         video_retained=True,
@@ -395,10 +514,12 @@ def build_manifest(
     fps: int,
     max_steps: int,
     keep_all_videos: bool,
+    execution_horizon: int,
+    chunk_size: int,
 ) -> dict[str, Any]:
     """构造用于恢复校验的完整运行清单。"""
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "checkpoint_path": str(checkpoint.resolve()),
         "checkpoint_sha256": checkpoint_sha256,
@@ -408,6 +529,8 @@ def build_manifest(
         "amp_enabled": bool(json.loads((checkpoint / "config.json").read_text(encoding="utf-8")).get("use_amp")),
         "fps": fps,
         "max_steps": max_steps,
+        "chunk_size": chunk_size,
+        "execution_horizon": execution_horizon,
         "keep_all_videos": keep_all_videos,
         "config": config,
         "rollout_count": len(specs),
@@ -416,7 +539,12 @@ def build_manifest(
 
 
 def manifest_identity(manifest: dict[str, Any]) -> dict[str, Any]:
-    """提取恢复时必须完全一致的manifest字段。"""
+    """提取恢复时必须完全一致的manifest字段。
+
+    ``config``、``rollout_count`` 和 ``rollout_keys`` 不参与校验——续跑
+    的主要场景就是在相同checkpoint和运行参数下扩展评测矩阵(增加scene seed
+    或 task)，此时只有rollout集合会变化，关键运行参数已通过其余字段校验。
+    """
     keys = (
         "schema_version",
         "checkpoint_path",
@@ -426,10 +554,9 @@ def manifest_identity(manifest: dict[str, Any]) -> dict[str, Any]:
         "amp_enabled",
         "fps",
         "max_steps",
+        "chunk_size",
+        "execution_horizon",
         "keep_all_videos",
-        "config",
-        "rollout_count",
-        "rollout_keys",
     )
     return {key: manifest.get(key) for key in keys}
 
@@ -505,6 +632,10 @@ def validate_completed_results(results: list[RolloutResult]) -> None:
             video = Path(result.video_path)
             if not video.is_file() or video.stat().st_size == 0:
                 raise ValueError(f"已完成结果的视频缺失或为空: {result.rollout_key}")
+        if result.action_trace_path:
+            trace = Path(result.action_trace_path)
+            if result.steps > 0 and (not trace.is_file() or trace.stat().st_size == 0):
+                raise ValueError(f"已完成结果的动作诊断日志缺失或为空: {result.rollout_key}")
 
 
 def bootstrap_success_ci(results: list[RolloutResult], repeats: int = 10_000) -> list[float]:
@@ -532,6 +663,123 @@ def grouped_rates(results: list[RolloutResult], attribute: str) -> dict[str, dic
         successes = sum(result.success for result in group)
         output[str(value)] = {"successes": successes, "rollouts": len(group), "success_rate": successes / len(group)}
     return output
+
+
+def summarize_action_clipping(results: list[RolloutResult]) -> dict[str, Any]:
+    """读取逐步动作日志并计算七个维度的裁剪统计。
+
+    Args:
+        results: 已完成且通过完整性检查的rollout结果。
+
+    Returns:
+        总体裁剪率、最常裁剪维度及逐维统计。
+    """
+    clipped_counts = np.zeros(len(ACTION_DIMENSIONS), dtype=np.int64)
+    absolute_excess_sums = np.zeros(len(ACTION_DIMENSIONS), dtype=np.float64)
+    absolute_excess_max = np.zeros(len(ACTION_DIMENSIONS), dtype=np.float64)
+    normalized_excess_sums = np.zeros(len(ACTION_DIMENSIONS), dtype=np.float64)
+    normalized_excess_max = np.zeros(len(ACTION_DIMENSIONS), dtype=np.float64)
+    trace_steps = 0
+    clipped_trace_steps = 0
+    trace_rollouts = 0
+
+    for result in results:
+        if not result.action_trace_path:
+            continue
+        trace_path = Path(result.action_trace_path)
+        if not trace_path.is_file():
+            raise FileNotFoundError(f"动作诊断日志缺失: {result.rollout_key}: {trace_path}")
+        trace_rollouts += 1
+        rollout_trace_steps = 0
+        for line_number, line in enumerate(trace_path.read_text(encoding="utf-8").splitlines(), start=1):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+                mask = np.asarray(record["clipped_mask"], dtype=np.bool_)
+                amount = np.abs(np.asarray(record["clip_amount"], dtype=np.float64))
+                lower = np.asarray(record["action_lower"], dtype=np.float64)
+                upper = np.asarray(record["action_upper"], dtype=np.float64)
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise ValueError(f"{trace_path.name}第{line_number}行动作记录损坏: {exc}") from exc
+            if record.get("rollout_key") != result.rollout_key:
+                raise ValueError(f"动作记录实验键不匹配: {trace_path.name}第{line_number}行")
+            if any(array.shape != (len(ACTION_DIMENSIONS),) for array in (mask, amount, lower, upper)):
+                raise ValueError(f"{trace_path.name}第{line_number}行必须包含七维动作数据")
+            ranges = upper - lower
+            if not np.isfinite(amount).all() or not np.isfinite(ranges).all() or np.any(ranges <= 0):
+                raise ValueError(f"{trace_path.name}第{line_number}行动作数据包含无效数值或范围")
+            normalized_excess = amount / ranges
+            trace_steps += 1
+            rollout_trace_steps += 1
+            clipped_trace_steps += int(mask.any())
+            clipped_counts += mask.astype(np.int64)
+            absolute_excess_sums += np.where(mask, amount, 0.0)
+            absolute_excess_max = np.maximum(absolute_excess_max, np.where(mask, amount, 0.0))
+            normalized_excess_sums += np.where(mask, normalized_excess, 0.0)
+            normalized_excess_max = np.maximum(
+                normalized_excess_max,
+                np.where(mask, normalized_excess, 0.0),
+            )
+        if not result.error and rollout_trace_steps != result.steps:
+            raise ValueError(
+                f"动作记录步数不完整: {result.rollout_key}: "
+                f"trace={rollout_trace_steps}, result={result.steps}"
+            )
+
+    per_dimension: list[dict[str, Any]] = []
+    for index, name in enumerate(ACTION_DIMENSIONS):
+        count = int(clipped_counts[index])
+        per_dimension.append(
+            {
+                "index": index,
+                "name": name,
+                "clipped_steps": count,
+                "clipped_step_rate": count / trace_steps if trace_steps else 0.0,
+                "mean_abs_clip_amount_when_clipped": (
+                    float(absolute_excess_sums[index] / count) if count else 0.0
+                ),
+                "max_abs_clip_amount": float(absolute_excess_max[index]),
+                "mean_normalized_excess_when_clipped": (
+                    float(normalized_excess_sums[index] / count) if count else 0.0
+                ),
+                "max_normalized_excess": float(normalized_excess_max[index]),
+            }
+        )
+    maximum_count = int(clipped_counts.max()) if trace_steps else 0
+    most_frequent = [
+        item["name"] for item in per_dimension if maximum_count > 0 and item["clipped_steps"] == maximum_count
+    ]
+    clipped_elements = int(clipped_counts.sum())
+    return {
+        "trace_rollouts": trace_rollouts,
+        "trace_steps": trace_steps,
+        "clipped_trace_steps": clipped_trace_steps,
+        "clipped_trace_step_rate": clipped_trace_steps / trace_steps if trace_steps else 0.0,
+        "clipped_action_elements": clipped_elements,
+        "action_elements": trace_steps * len(ACTION_DIMENSIONS),
+        "clipped_action_element_rate": (
+            clipped_elements / (trace_steps * len(ACTION_DIMENSIONS)) if trace_steps else 0.0
+        ),
+        "most_frequently_clipped_dimensions": most_frequent,
+        "per_dimension": per_dimension,
+    }
+
+
+def write_action_clipping_outputs(output_dir: Path, results: list[RolloutResult]) -> dict[str, Any]:
+    """写出动作裁剪JSON汇总和逐维CSV。"""
+    clipping = summarize_action_clipping(results)
+    write_json(output_dir / ACTION_CLIPPING_JSON, clipping)
+    with (output_dir / ACTION_CLIPPING_CSV).open("w", encoding="utf-8-sig", newline="") as csv_file:
+        fieldnames = (
+            list(clipping["per_dimension"][0].keys())
+            if clipping["per_dimension"]
+            else ["index", "name", "clipped_steps", "clipped_step_rate"]
+        )
+        writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(clipping["per_dimension"])
+    return clipping
 
 
 def summarize_results(results: list[RolloutResult]) -> dict[str, Any]:
@@ -629,6 +877,7 @@ def write_report(path: Path, summary: dict[str, Any], manifest: dict[str, Any]) 
         f"- Unseen成功率：{summary['unseen_success_rate']:.2%}",
         f"- 语言泛化差距：{summary['language_generalization_gap']:.2%}",
         f"- 控制异常：{summary['control_exceptions']}",
+        f"- Execution horizon：{manifest.get('execution_horizon', 'unknown')}步",
         "",
         "## 分任务成功率",
         "",
@@ -637,6 +886,26 @@ def write_report(path: Path, summary: dict[str, Any], manifest: dict[str, Any]) 
     ]
     for task_id, value in summary["by_task"].items():
         lines.append(f"| {task_id} | {value['successes']} | {value['rollouts']} | {value['success_rate']:.2%} |")
+    clipping = summary.get("action_clipping", {})
+    lines.extend(
+        [
+            "",
+            "## 动作裁剪",
+            "",
+            f"- 至少一维被裁剪的控制步比例：{clipping.get('clipped_trace_step_rate', 0.0):.2%}",
+            f"- 七维动作元素裁剪比例：{clipping.get('clipped_action_element_rate', 0.0):.2%}",
+            "- 最常裁剪维度："
+            + (", ".join(clipping.get("most_frequently_clipped_dimensions", [])) or "无"),
+            "",
+            "| 维度 | 裁剪步数 | 裁剪率 | 平均归一化越界量 | 最大归一化越界量 |",
+            "| --- | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for item in clipping.get("per_dimension", []):
+        lines.append(
+            f"| {item['name']} | {item['clipped_steps']} | {item['clipped_step_rate']:.2%} | "
+            f"{item['mean_normalized_excess_when_clipped']:.6f} | {item['max_normalized_excess']:.6f} |"
+        )
     lines.extend(["", "## 结果边界", "", "结果仅代表本机MuJoCo仿真闭环能力，不代表真实UR10e成功率。"])
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -651,6 +920,7 @@ def write_results(output_dir: Path, results: list[RolloutResult], manifest: dict
         writer.writeheader()
         writer.writerows(asdict(result) for result in results)
     summary = summarize_results(results)
+    summary["action_clipping"] = write_action_clipping_outputs(output_dir, results)
     write_json(output_dir / "summary.json", summary)
     if manifest is not None:
         write_report(output_dir / "report.md", summary, manifest)
@@ -670,6 +940,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     max_steps = args.max_steps if args.max_steps is not None else int(evaluation.get("max_steps", 400))
     if fps <= 0 or max_steps <= 0:
         raise ValueError("fps和max_steps必须大于零")
+    execution_horizon, chunk_size = resolve_execution_horizon(
+        checkpoint,
+        evaluation,
+        args.execution_horizon,
+    )
     specs = build_specs(evaluation, args.max_rollouts)
     checkpoint_hash = sha256_file(checkpoint / "model.safetensors")
     manifest = build_manifest(
@@ -681,12 +956,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         fps,
         max_steps,
         args.keep_all_videos,
+        execution_horizon,
+        chunk_size,
     )
     results = prepare_run(output_dir, manifest, args.resume)
     completed = {result.rollout_key for result in results}
     pending = [spec for spec in specs if spec.key not in completed]
     if pending:
-        policy, preprocessor, postprocessor = load_policy_bundle(checkpoint, args.device)
+        policy, preprocessor, postprocessor = load_policy_bundle(
+            checkpoint,
+            args.device,
+            execution_horizon,
+        )
         for spec in pending:
             result = run_single_rollout(
                 policy,
@@ -698,6 +979,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 max_steps,
                 args.device,
                 checkpoint_hash,
+                execution_horizon,
             )
             append_jsonl(output_dir / RESULTS_JSONL, result)
             results.append(result)

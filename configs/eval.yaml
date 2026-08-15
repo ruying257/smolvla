@@ -1,5 +1,5 @@
 # 基础回归配置：1个未见场景 × 4类任务 × 3种措辞 × 1个模型随机种子 = 12条。
-# scene_seed只控制积木初始布局；policy_seed控制SmolVLA Flow Matching采样噪声。
+# scene_seed控制积木初始布局；policy_seed固定为20260，仅用于复现Flow Matching采样。
 evaluation:
   output_dir: outputs/eval/basic
   fps: 20

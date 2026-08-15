@@ -17,10 +17,10 @@ class CloudTrainingCommandTests(unittest.TestCase):
 
     def test_smoke_command_locks_dataset_features_and_single_step(self) -> None:
         """smoke 模式必须推断七维特征并只训练一步。"""
-        config = load_yaml_config(PROJECT_ROOT / "configs" / "cloud_train.yaml")
+        config = load_yaml_config(PROJECT_ROOT / "configs" / "cloud_train_Tencent.yaml")
         command = build_train_command(
             config,
-            Path("/srv/smolvla-data/smolvla_ur10e"),
+            Path("/srv/smolvla-data/smolvla_ur10e_grounding_v2"),
             Path("/srv/smolvla/outputs/smoke/train"),
             "smoke",
             smoke=True,
@@ -36,7 +36,7 @@ class CloudTrainingCommandTests(unittest.TestCase):
     def test_default_dataset_is_inside_project(self) -> None:
         """未显式传参时应读取项目内的数据集目录。"""
         args = build_train_parser().parse_args([])
-        self.assertEqual(args.dataset_root, PROJECT_ROOT / "smolvla-data" / "smolvla_ur10e")
+        self.assertEqual(args.dataset_root, PROJECT_ROOT / "smolvla-data" / "smolvla_ur10e_grounding_v2")
 
 
 if __name__ == "__main__":

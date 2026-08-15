@@ -1,5 +1,5 @@
-# Seen场景实验：3个训练已见场景 × 4类任务 × 1种已见措辞 × 2个模型随机种子 = 24条。
-# seed 0、1、2在四类任务的训练示范中均出现；本实验只验证已见布局下的canonical闭环效果。
+# Seen场景实验：6个训练已见场景 × 4类任务 × 1种已见措辞 × 1个模型随机种子 = 24条。
+# seed 0至5在四类任务的训练示范中均出现；本实验只验证已见布局下的canonical闭环效果。
 evaluation:
   output_dir: outputs/eval/seen_canonical_s10000
   fps: 20
@@ -9,6 +9,9 @@ evaluation:
     - 0
     - 1
     - 2
+    - 3
+    - 4
+    - 5
   task_ids:
     - red_on_blue
     - red_on_yellow
@@ -16,6 +19,6 @@ evaluation:
     - green_on_yellow
   prompt_types:
     - canonical
-  # 与正式实验使用相同policy seed，控制Flow Matching采样随机性。
+  # 与正式实验一样固定policy seed为20260，仅用于复现Flow Matching采样。
   policy_seeds:
     - 20260

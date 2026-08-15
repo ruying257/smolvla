@@ -11,7 +11,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from collector.dataset_io import CONTRACT_FILENAME, DATASET_FPS, DATASET_REPO_ID
+from collector.dataset_io import CONTRACT_FILENAME, DATASET_FPS, configure_hf_datasets_cache
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -128,7 +128,11 @@ def run_replay(root: Path, episode_index: int) -> int:
     if not 0 <= episode_index < len(episodes):
         raise IndexError(f"episode_index超出范围: {episode_index}, total={len(episodes)}")
     episode_meta = episodes[episode_index]
-    dataset = LeRobotDataset(DATASET_REPO_ID, root=root.resolve(), video_backend="pyav")
+    repo_id = str(contract.get("repo_id", ""))
+    if not repo_id:
+        raise ValueError("采集契约缺少repo_id")
+    configure_hf_datasets_cache(root.resolve().parent / ".hf-lerobot-cache")
+    dataset = LeRobotDataset(repo_id, root=root.resolve(), video_backend="pyav")
     episode = dataset.meta.episodes[episode_index]
     start = int(episode["dataset_from_index"])
     stop = int(episode["dataset_to_index"])
@@ -191,4 +195,3 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
