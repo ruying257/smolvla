@@ -5,12 +5,12 @@ policy:
   empty_cameras: 1
 
 dataset:
-  repo_id: smolvla_ur10e_grounding_v2
+  repo_id: smolvla_ur10e_data_v2
   video_backend: pyav
 
 train:
-  output_dir: outputs/train/smolvla_ur10e_grounding_v2
-  job_name: smolvla_ur10e_grounding_v2
+  output_dir: outputs/train/smolvla_ur10e_data_v2
+  job_name: smolvla_ur10e_data_v2
   seed: 1000
   batch_size: 8
   steps: 12000

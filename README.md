@@ -75,7 +75,7 @@ Latin square采集，不再用下面的v1单任务追加命令。完整pilot、�
 采集一条红积木到蓝色区域的episode：
 
 ```powershell
-python -m collector.collect `
+python -m collector.v1.collect `
   --root smolvla-data\smolvla_ur10e_v1 `
   --task red_on_blue `
   --seed 0 `
@@ -85,7 +85,7 @@ python -m collector.collect `
 对已有数据集显式续采，并循环使用指定seed：
 
 ```powershell
-python -m collector.collect `
+python -m collector.v1.collect `
   --root smolvla-data\smolvla_ur10e_v1 `
   --task green_on_yellow `
   --seeds 3,7,11 `
@@ -112,7 +112,7 @@ python -m collector.collect `
 回放第0条episode：
 
 ```powershell
-python -m collector.replay --root smolvla-data\smolvla_ur10e_v1 --episode-index 0
+python -m collector.v1.replay --root smolvla-data\smolvla_ur10e_v1 --episode-index 0
 ```
 
 回放窗口同步显示第三方和腕部视频，以及任务、seed、7维状态和7维动作。空格暂停，左右方向键逐帧，`Q`或`Esc`退出；回放不会创建MuJoCo环境。

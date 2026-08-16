@@ -11,7 +11,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from collector.dataset_io import CONTRACT_FILENAME, DATASET_FPS, configure_hf_datasets_cache
+from collector.common.dataset_io import CONTRACT_FILENAME, DATASET_FPS, configure_hf_datasets_cache
 
 
 def build_parser() -> argparse.ArgumentParser:

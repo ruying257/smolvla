@@ -74,9 +74,10 @@ pretrained_model/
 
 ```powershell
 .\evaluate\run.ps1 `
-  --checkpoint outputs\train\smolvla_ur10e_b8_s15000_r2 `
+  --checkpoint outputs\train\smolvla_ur10e_data_v2 `
   --config configs\eval_seen.yaml `
-  --output-dir outputs\eval\seen_canonical
+  --output-dir outputs\eval\train_3_seen_canonical_h20 `
+  --execution-horizon 20
 ```
 
 中断后在同一命令末尾增加`--resume`。分析时只能将seen实验与正式120条结果中的`prompt_type=canonical`子集比较，不能把24条seen结果与包含三种措辞的总体成功率直接相减。该对照用于描述已见布局与未见布局的性能差距，不等同于独立测试集上的泛化结论。
@@ -92,8 +93,8 @@ conda activate smolvla-eval
 .\evaluate\run.ps1 `
   --checkpoint outputs\train\smolvla_ur10e_b8_s15000_r2 `
   --config configs\eval_seen.yaml `
-  --output-dir outputs\eval\seen_canonical_h10 `
-  --execution-horizon 10
+  --output-dir outputs\eval\train_2_seen_canonical_h6 `
+  --execution-horizon 6
 ```
 
 建议与原`seen_canonical`结果成对比较成功率、抓取阶段轨迹、推理耗时和动作裁剪率。horizon=10会把模型推理频率提高约5倍，因此不能只比较成功率而忽略计算开销。

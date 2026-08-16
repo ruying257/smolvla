@@ -29,6 +29,7 @@ from evaluate.rollout import (
     resolve_execution_horizon,
     run_single_rollout,
     set_policy_seed,
+    source_sha256,
     summarize_action_clipping,
     summarize_results,
     write_results,
@@ -100,6 +101,13 @@ class EvaluationContractTests(unittest.TestCase):
         self.assertEqual(args.device, "cuda")
         self.assertFalse(args.resume)
         self.assertIsNone(args.execution_horizon)
+
+    def test_source_hash_uses_current_collector_task_definition(self) -> None:
+        """采集目录重组后，评测源码哈希仍应读取实际任务定义。"""
+        first = source_sha256()
+        second = source_sha256()
+        self.assertEqual(first, second)
+        self.assertEqual(len(first), 64)
 
     def test_execution_horizon_uses_cli_override_and_validates_chunk_size(self) -> None:
         """执行步数应支持命令行覆盖且不能超过模型chunk长度。"""

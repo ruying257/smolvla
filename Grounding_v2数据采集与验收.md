@@ -25,7 +25,7 @@ python -m pip install -r requirements-collector.txt
 首次启动：
 
 ```powershell
-python -m collector.collect_matrix `
+python -m collector.v2.collect_matrix `
   --config configs\collect_grounding_v2.yaml `
   --pilot
 ```
@@ -33,7 +33,7 @@ python -m collector.collect_matrix `
 若中途关闭窗口，未按 Enter 的episode不会保存。继续pilot时必须显式恢复：
 
 ```powershell
-python -m collector.collect_matrix `
+python -m collector.v2.collect_matrix `
   --config configs\collect_grounding_v2.yaml `
   --pilot `
   --resume
@@ -47,7 +47,7 @@ python -m collector.collect_matrix `
 伪造哈希。先归档并重采提示中的已有键，例如：
 
 ```powershell
-python -m collector.collect_matrix `
+python -m collector.v2.collect_matrix `
   --config configs\collect_grounding_v2.yaml `
   --resume `
   --redo-key "scene=210|task=red_on_blue|prompt=canonical"
@@ -56,7 +56,7 @@ python -m collector.collect_matrix `
 然后继续pilot：
 
 ```powershell
-python -m collector.collect_matrix `
+python -m collector.v2.collect_matrix `
   --config configs\collect_grounding_v2.yaml `
   --pilot `
   --resume
@@ -69,7 +69,7 @@ python -m collector.collect_matrix `
 ## 2. 生成并复核pilot蒙太奇
 
 ```powershell
-python -m collector.build_review_montages `
+python -m collector.v2.build_review_montages `
   --config configs\collect_grounding_v2.yaml `
   --pilot
 ```
@@ -87,7 +87,7 @@ smolvla-data/.smolvla_ur10e_grounding_v2_collection/review_montages/scene_212.mp
 完成复核后运行pilot验收：
 
 ```powershell
-python -m collector.validate_grounding_dataset `
+python -m collector.v2.validate_grounding_dataset `
   --config configs\collect_grounding_v2.yaml `
   --pilot
 ```
@@ -97,7 +97,7 @@ python -m collector.validate_grounding_dataset `
 ## 3. 继续采集剩余72条
 
 ```powershell
-python -m collector.collect_matrix `
+python -m collector.v2.collect_matrix `
   --config configs\collect_grounding_v2.yaml `
   --resume
 ```
@@ -110,14 +110,14 @@ python -m collector.collect_matrix `
 默认2倍速：
 
 ```powershell
-python -m collector.build_review_montages `
+python -m collector.v2.build_review_montages `
   --config configs\collect_grounding_v2.yaml
 ```
 
 也可指定2至4倍速：
 
 ```powershell
-python -m collector.build_review_montages `
+python -m collector.v2.build_review_montages `
   --config configs\collect_grounding_v2.yaml `
   --speed 4
 ```
@@ -134,7 +134,7 @@ red_on_yellow  | green_on_yellow
 例如只重采scene 210的红积木到蓝板：
 
 ```powershell
-python -m collector.collect_matrix `
+python -m collector.v2.collect_matrix `
   --config configs\collect_grounding_v2.yaml `
   --resume `
   --redo-key "scene=210|task=red_on_blue|prompt=canonical"
@@ -146,7 +146,7 @@ python -m collector.collect_matrix `
 ## 6. 全量验收并生成最终数据集
 
 ```powershell
-python -m collector.validate_grounding_dataset `
+python -m collector.v2.validate_grounding_dataset `
   --config configs\collect_grounding_v2.yaml `
   --finalize
 ```

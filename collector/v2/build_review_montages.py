@@ -11,7 +11,7 @@ import av
 import cv2
 import numpy as np
 
-from collector.collection_plan import (
+from collector.v2.collection_plan import (
     REVIEW_FILENAME,
     load_config,
     load_progress,

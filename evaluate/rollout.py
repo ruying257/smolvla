@@ -21,7 +21,7 @@ from typing import Any, Callable, Sequence
 import imageio.v2 as imageio
 import numpy as np
 
-from collector.task_spec import TASKS
+from collector.common import task_spec as task_spec_module
 from evaluate.common import (
     PROJECT_ROOT,
     action_to_vector,
@@ -35,6 +35,7 @@ from evaluate.common import (
 from sim.environment import CleanTabletopEnv
 
 
+TASKS = task_spec_module.TASKS
 UNSEEN_TEMPLATE = "Move the {cube_color} cube to the {pad_color} pad."
 RESULTS_JSONL = "rollouts.jsonl"
 MANIFEST_JSON = "run_manifest.json"
@@ -460,9 +461,10 @@ def sha256_file(path: Path) -> str:
 def source_sha256() -> str:
     """计算影响评测行为的项目源码身份。"""
     digest = hashlib.sha256()
+    task_spec_path = Path(task_spec_module.__file__).resolve()
     paths = sorted((PROJECT_ROOT / "evaluate").glob("*.py")) + [
         PROJECT_ROOT / "sim" / "environment.py",
-        PROJECT_ROOT / "collector" / "task_spec.py",
+        task_spec_path,
     ]
     for path in paths:
         digest.update(str(path.relative_to(PROJECT_ROOT)).encode("utf-8"))

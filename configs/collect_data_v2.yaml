@@ -1,7 +1,7 @@
 dataset:
-  root: smolvla-data/smolvla_ur10e_grounding_v2
-  repo_id: smolvla_ur10e_grounding_v2
-  version: smolvla_ur10e_grounding_v2
+  root: smolvla-data/smolvla_ur10e_v2
+  repo_id: smolvla_ur10e_v2
+  version: smolvla_ur10e_v2
 
 scene_seeds:
   - 210

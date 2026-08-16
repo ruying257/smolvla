@@ -19,7 +19,7 @@ from typing import Any, Iterable, Sequence
 
 import numpy as np
 
-from collector.task_spec import TASKS
+from collector.common import task_spec as task_spec_module
 from evaluate.common import convert_policy_action, find_pretrained_model, load_yaml_config, resolve_path, write_json
 from evaluate.rollout import build_prompt, load_policy_bundle, make_policy_observation, set_policy_seed
 from sim.environment import CleanTabletopEnv
@@ -32,6 +32,7 @@ os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 CUBE_COLORS = ("red", "green")
 PAD_COLORS = ("blue", "yellow")
 PROMPT_TYPES = ("canonical", "synonym", "unseen")
+TASKS = task_spec_module.TASKS
 TASK_IDS = {
     (task.cube_color, task.pad_color): task_id for task_id, task in TASKS.items()
 }
@@ -192,12 +193,13 @@ def sha256_file(path: Path) -> str:
 def source_sha256() -> str:
     """计算影响conditioning诊断行为的项目源码身份。"""
     project_root = Path(__file__).resolve().parents[1]
+    task_spec_path = Path(task_spec_module.__file__).resolve()
     paths = (
         Path(__file__).resolve(),
         project_root / "evaluate" / "common.py",
         project_root / "evaluate" / "rollout.py",
         project_root / "sim" / "environment.py",
-        project_root / "collector" / "task_spec.py",
+        task_spec_path,
     )
     digest = hashlib.sha256()
     for path in paths:
