@@ -14,7 +14,14 @@ from typing import Iterator
 
 import numpy as np
 
-from evaluate.common import convert_policy_action, find_pretrained_model, load_yaml_config
+from evaluate.common import (
+    JointMotionLimiter,
+    MotionLimits,
+    convert_policy_action,
+    find_pretrained_model,
+    load_motion_limits,
+    load_yaml_config,
+)
 from evaluate.rollout import (
     RolloutResult,
     RolloutSpec,
@@ -28,6 +35,7 @@ from evaluate.rollout import (
     prepare_run,
     retain_videos,
     resolve_execution_horizon,
+    resolve_motion_limiter,
     run_single_rollout,
     select_scene_specs,
     set_policy_seed,
@@ -35,7 +43,9 @@ from evaluate.rollout import (
     summarize_action_clipping,
     summarize_results,
     write_results,
+    update_manifest_identity,
 )
+from scripts.calibrate_motion_limits import calibrate
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -160,6 +170,16 @@ class EvaluationContractTests(unittest.TestCase):
         self.assertEqual(evaluation["appearance_variant"], "green_white")
         self.assertEqual(evaluation["execution_horizon"], 25)
 
+    def test_h20_motion_limiter_configs_share_the_same_matrix(self) -> None:
+        """h20基线与限制器必须只在motion_limiter和输出目录上不同。"""
+        baseline = load_yaml_config(PROJECT_ROOT / "configs" / "eval" / "mug_v1_seen_h20_baseline.yaml")["evaluation"]
+        limited = load_yaml_config(PROJECT_ROOT / "configs" / "eval" / "mug_v1_seen_h20_motion_limiter.yaml")["evaluation"]
+        self.assertEqual(len(build_specs(baseline)), 40)
+        self.assertEqual(build_specs(baseline), build_specs(limited))
+        self.assertEqual(baseline["execution_horizon"], 20)
+        self.assertFalse(baseline["motion_limiter"]["enabled"])
+        self.assertTrue(limited["motion_limiter"]["enabled"])
+
     def test_checkpoint_locator_accepts_only_complete_model(self) -> None:
         """只有配置、权重和处理器齐全的目录才能用于评测。"""
         with workspace_temp_dir() as output:
@@ -186,6 +206,35 @@ class EvaluationContractTests(unittest.TestCase):
             convert_policy_action(np.zeros(6), ranges)
         with self.assertRaises(ValueError):
             convert_policy_action(np.asarray([0, 0, 0, 0, 0, 0, np.nan]), ranges)
+
+    def test_motion_limit_file_and_config_are_validated(self) -> None:
+        """启用限制器时应锁定20Hz六关节限制文件，并拒绝fps漂移。"""
+        with workspace_temp_dir() as output:
+            path = output / "limits.json"
+            payload = {
+                "schema_version": 1,
+                "fps": 20,
+                "joint_names": ["shoulder_pan", "shoulder_lift", "elbow", "wrist_1", "wrist_2", "wrist_3"],
+                "velocity_limits_rad_s": [1.0] * 6,
+                "acceleration_limits_rad_s2": [2.0] * 6,
+            }
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            limits = load_motion_limits(path, 20)
+            np.testing.assert_allclose(limits.velocity_limits_rad_s, np.ones(6))
+            with self.assertRaisesRegex(ValueError, "fps"):
+                load_motion_limits(path, 10)
+            settings = resolve_motion_limiter({"motion_limiter": {"enabled": True, "limits_path": str(path)}}, 20)
+            self.assertTrue(settings["enabled"])
+
+    def test_expert_calibration_keeps_episode_boundaries_separate(self) -> None:
+        """专家动作标定不得把两个episode首尾拼接为一个大跳变。"""
+        trajectories = [
+            np.tile(np.asarray([[0.0], [0.1], [0.4]]), (1, 6)),
+            np.tile(np.asarray([[10.0], [10.05], [10.2]]), (1, 6)),
+        ]
+        velocity, acceleration = calibrate(trajectories, fps=10, quantile=0.5, margin=1.0)
+        self.assertTrue(np.all(velocity < 3.0))
+        self.assertTrue(np.all(acceleration > 0.0))
 
     def test_all_prompt_types_are_separate(self) -> None:
         """canonical、synonym和unseen文本必须保持独立。"""
@@ -232,6 +281,12 @@ class EvaluationContractTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "实验键不一致"):
                 prepare_failure_update(output, manifest, specs[:1], "checkpoint-a")
 
+    def test_failure_update_treats_missing_motion_limiter_as_disabled(self) -> None:
+        """旧manifest缺少motion_limiter时应等同于当前默认未启用状态。"""
+        legacy = update_manifest_identity({"motion_limiter": None})
+        current = update_manifest_identity({"motion_limiter": {"enabled": False}})
+        self.assertEqual(legacy, current)
+
 
 class FakePolicy:
     """返回当前关节状态的无模型测试策略。"""
@@ -277,12 +332,37 @@ class LocalRolloutTests(unittest.TestCase):
             self.assertEqual(first_trace["model_output"], first_trace["physical_action"])
             self.assertEqual(first_trace["physical_action"], first_trace["executed_action"])
             self.assertTrue(first_trace["chunk_start"])
+            self.assertIn("actual_qpos_after", first_trace)
+            self.assertIn("actual_qvel_after", first_trace)
+            self.assertIn("ee_position_after", first_trace)
             summary = write_results(output, [result])
             self.assertEqual(summary["rollouts"], 1)
             self.assertEqual(summary["action_clipping"]["trace_steps"], 2)
             self.assertTrue((output / "rollouts.csv").is_file())
             self.assertTrue((output / "action_clipping_summary.json").is_file())
             self.assertTrue((output / "action_clipping_by_dimension.csv").is_file())
+            self.assertTrue((output / "motion_metrics_by_rollout.csv").is_file())
+            self.assertTrue((output / "motion_metrics_summary.json").is_file())
+            self.assertTrue((output / "motion_metrics_report.md").is_file())
+
+    def test_joint_motion_limiter_limits_second_order_reference_and_preserves_gripper(self) -> None:
+        """限制器必须同时限制速度、加速度，并原样透传夹爪指令。"""
+        ranges = np.asarray([[-1.0, 1.0]] * 6, dtype=np.float64)
+        limiter = JointMotionLimiter(
+            MotionLimits(np.full(6, 1.0), np.full(6, 4.0)),
+            dt=0.1,
+            arm_ctrlrange=ranges,
+        )
+        limiter.reset(np.zeros(6))
+        first, first_mask, _ = limiter.limit(np.asarray([1.0] * 6 + [0.73]))
+        second, second_mask, _ = limiter.limit(np.asarray([1.0] * 6 + [0.21]))
+        np.testing.assert_allclose(first[:6], np.full(6, 0.04), atol=1e-7)
+        np.testing.assert_allclose(second[:6], np.full(6, 0.12), atol=1e-7)
+        self.assertTrue(first_mask[:6].all())
+        self.assertTrue(second_mask[:6].all())
+        self.assertAlmostEqual(float(first[6]), 0.73)
+        self.assertAlmostEqual(float(second[6]), 0.21)
+        self.assertTrue(np.all(np.abs(limiter.reference_velocity) <= 1.0))
 
 
 class ResumeAndStatisticsTests(unittest.TestCase):

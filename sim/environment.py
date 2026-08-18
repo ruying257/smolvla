@@ -436,6 +436,19 @@ class CleanTabletopEnv:
         gripper_state = 1.0 if gripper_qpos >= GRIPPER_RELEASED_QPOS else 0.0
         return np.asarray([*joint_positions, gripper_state], dtype=np.float32)
 
+    def get_end_effector_position(self) -> NDArray[np.float64]:
+        """返回机械臂末端 attachment site 的世界坐标副本。"""
+        site_id = _require_object_id(self.model, mujoco.mjtObj.mjOBJ_SITE, "attachment_site")
+        return self.data.site_xpos[site_id].copy()
+
+    def get_arm_qvel(self) -> NDArray[np.float64]:
+        """返回六个机械臂关节的当前实际角速度副本。"""
+        values = []
+        for joint_name in ARM_JOINT_NAMES:
+            joint_id = _require_object_id(self.model, mujoco.mjtObj.mjOBJ_JOINT, joint_name)
+            values.append(self.data.qvel[int(self.model.jnt_dofadr[joint_id])])
+        return np.asarray(values, dtype=np.float64)
+
     def apply_joint_action(
         self,
         action: NDArray[np.floating],

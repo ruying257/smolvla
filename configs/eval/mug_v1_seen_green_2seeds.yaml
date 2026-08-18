@@ -1,0 +1,12 @@
+# 绿白杯最小冒烟：2个已见scene × 2个任务 = 4条。
+evaluation:
+  environment: mug
+  appearance_variant: green_white
+  output_dir: outputs/eval/mug_v1_s8000_h25_seen_green_2seeds
+  fps: 20
+  max_steps: 360
+  execution_horizon: 25
+  scene_seeds: [2291, 6705]
+  task_ids: [mug_on_blue, mug_on_yellow]
+  prompt_types: [canonical]
+  policy_seeds: [20260]

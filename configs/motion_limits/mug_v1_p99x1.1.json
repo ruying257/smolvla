@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "dataset_root": "F:\\桌面\\smolvla\\smolvla-data\\smolvla_ur10e_mug_v1",
+  "dataset_sha256": "d3ddce66370dfebf04f311d8dece90930c0711f1166e0b7311a22ceab459466a",
+  "fps": 20,
+  "quantile": 0.99,
+  "margin": 1.1,
+  "joint_names": [
+    "shoulder_pan",
+    "shoulder_lift",
+    "elbow",
+    "wrist_1",
+    "wrist_2",
+    "wrist_3"
+  ],
+  "episode_count": 40,
+  "parquet_file_count": 1,
+  "velocity_limits_rad_s": [
+    0.23526270508766176,
+    0.3079290533065796,
+    0.2886267900466919,
+    0.41794169425964345,
+    0.004279775619506829,
+    0.23526303291320802
+  ],
+  "acceleration_limits_rad_s2": [
+    3.89828267097473,
+    5.378166389465316,
+    5.204932880401611,
+    7.6169054031372,
+    0.1500098228454584,
+    3.8977849006652807
+  ]
+}

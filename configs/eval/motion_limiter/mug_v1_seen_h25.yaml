@@ -1,0 +1,14 @@
+# 杯子V1速度/加速度限制器：与h20基线使用完全相同的40条矩阵。
+evaluation:
+  environment: mug
+  output_dir: outputs/eval/motion_limits/mug_v1_s8000_h25_seen_canonical_motion_limiter
+  fps: 20
+  max_steps: 360
+  execution_horizon: 25
+  motion_limiter:
+    enabled: true
+    limits_path: configs/motion_limits/mug_v1_p99x1.1.json
+  scene_seeds: [2291, 6705, 1894, 9864, 8669, 4164, 7359, 6942, 11, 9832, 5806, 8638, 6057, 2371, 2337, 8733, 411, 9890, 4880, 7377]
+  task_ids: [mug_on_blue, mug_on_yellow]
+  prompt_types: [canonical]
+  policy_seeds: [20260]

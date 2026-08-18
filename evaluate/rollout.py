@@ -23,10 +23,13 @@ import numpy as np
 
 from collector.common import task_spec as task_spec_module
 from evaluate.common import (
+    JointMotionLimiter,
+    MotionLimits,
     PROJECT_ROOT,
     action_to_vector,
     convert_policy_action,
     find_pretrained_model,
+    load_motion_limits,
     load_yaml_config,
     percentile,
     resolve_path,
@@ -48,6 +51,9 @@ UPDATE_JSON = "rollout_update.json"
 ACTION_TRACE_DIR = "action_traces"
 ACTION_CLIPPING_JSON = "action_clipping_summary.json"
 ACTION_CLIPPING_CSV = "action_clipping_by_dimension.csv"
+MOTION_METRICS_CSV = "motion_metrics_by_rollout.csv"
+MOTION_METRICS_JSON = "motion_metrics_summary.json"
+MOTION_METRICS_REPORT = "motion_metrics_report.md"
 ACTION_DIMENSIONS = (
     "shoulder_pan",
     "shoulder_lift",
@@ -130,7 +136,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="覆盖更新已有结果中的全部失败rollout；不可与--resume、--scene-seed或--max-rollouts组合",
     )
-    parser.add_argument("--keep-all-videos", action="store_true", help="保留全部成功与失败视频")
+    parser.add_argument("--prune-videos", action="store_true", help="裁剪视频：仅保留全部失败视频及每个任务措辞组合的首条成功视频（默认保留全部视频）")
     return parser
 
 
@@ -233,6 +239,32 @@ def resolve_execution_horizon(
     return execution_horizon, chunk_size
 
 
+def resolve_motion_limiter(evaluation: dict[str, Any], fps: int) -> dict[str, Any]:
+    """解析评测配置中的可选二阶关节限制器。"""
+    section = evaluation.get("motion_limiter", {})
+    if section is None:
+        section = {}
+    if not isinstance(section, dict):
+        raise ValueError("motion_limiter配置必须是映射")
+    enabled = bool(section.get("enabled", False))
+    if not enabled:
+        return {"enabled": False}
+    raw_path = section.get("limits_path")
+    if not isinstance(raw_path, str) or not raw_path:
+        raise ValueError("启用motion_limiter时必须提供limits_path")
+    path = resolve_path(raw_path)
+    limits = load_motion_limits(path, fps)
+    # 在此处提前触发构造校验，避免运行到第一条轨迹才发现标定文件非法。
+    MotionLimits(limits.velocity_limits_rad_s, limits.acceleration_limits_rad_s2)
+    return {
+        "enabled": True,
+        "limits_path": str(path),
+        "limits_sha256": sha256_file(path),
+        "velocity_limits_rad_s": limits.velocity_limits_rad_s.astype(float).tolist(),
+        "acceleration_limits_rad_s2": limits.acceleration_limits_rad_s2.astype(float).tolist(),
+    }
+
+
 def load_policy_bundle(
     checkpoint: Path,
     device: str,
@@ -298,6 +330,7 @@ def run_single_rollout(
     execution_horizon: int = 50,
     environment: str = "cube",
     appearance_variant: str = "original",
+    motion_limiter_settings: dict[str, Any] | None = None,
 ) -> RolloutResult:
     """执行一条固定场景和模型随机种子的闭环rollout。
 
@@ -314,6 +347,7 @@ def run_single_rollout(
         execution_horizon: 每个预测chunk实际执行的步数。
         environment: ``cube``或``mug``仿真环境。
         appearance_variant: 杯子环境使用的视觉外观变体。
+        motion_limiter_settings: 已解析的限制器配置；未启用时为``None``或``enabled=false``。
 
     Returns:
         单条闭环评测结果。
@@ -362,6 +396,15 @@ def run_single_rollout(
             physics_steps = max(1, round((1.0 / fps) / float(env.model.opt.timestep)))
             action_lower = np.concatenate([env.model.actuator_ctrlrange[:6, 0], [0.0]])
             action_upper = np.concatenate([env.model.actuator_ctrlrange[:6, 1], [1.0]])
+            limiter: JointMotionLimiter | None = None
+            limiter_enabled = bool(motion_limiter_settings and motion_limiter_settings.get("enabled", False))
+            if limiter_enabled:
+                limits = MotionLimits(
+                    np.asarray(motion_limiter_settings["velocity_limits_rad_s"], dtype=np.float64),
+                    np.asarray(motion_limiter_settings["acceleration_limits_rad_s2"], dtype=np.float64),
+                )
+                limiter = JointMotionLimiter(limits, 1.0 / fps, env.model.actuator_ctrlrange[:6])
+                limiter.reset(np.asarray(env.get_state()[:6], dtype=np.float64))
             for step_index in range(max_steps):
                 images = env.capture_training_images()
                 writer.append_data(np.concatenate([images["agent"], images["wrist"]], axis=1))
@@ -382,6 +425,16 @@ def run_single_rollout(
                 physical_action_vector = action_to_vector(physical_action)
                 safe_action = convert_policy_action(physical_action_vector, env.model.actuator_ctrlrange[:6])
                 clipped_steps += int(safe_action.clipped)
+                if limiter is None:
+                    executed_action = safe_action.command
+                    motion_limited_mask = np.zeros(7, dtype=np.bool_)
+                    motion_limit_amount = np.zeros(7, dtype=np.float32)
+                    reference_velocity = np.zeros(6, dtype=np.float64)
+                else:
+                    executed_action, motion_limited_mask, motion_limit_amount = limiter.limit(safe_action.command)
+                    reference_velocity = limiter.reference_velocity
+                env.apply_joint_action(executed_action, physics_steps=physics_steps)
+                actual_state_after = env.get_state()
                 write_action_trace_record(
                     trace_file,
                     {
@@ -390,16 +443,23 @@ def run_single_rollout(
                         "chunk_start": step_index % execution_horizon == 0,
                         "model_output": model_output_vector.tolist(),
                         "physical_action": physical_action_vector.tolist(),
-                        "executed_action": safe_action.command.astype(np.float64).tolist(),
+                        "range_safe_action": safe_action.command.astype(np.float64).tolist(),
+                        "executed_action": executed_action.astype(np.float64).tolist(),
                         "action_lower": action_lower.astype(np.float64).tolist(),
                         "action_upper": action_upper.astype(np.float64).tolist(),
                         "clipped_mask": safe_action.clipped_mask.tolist(),
                         "clip_amount": safe_action.clip_amount.astype(np.float64).tolist(),
                         "any_clipped": safe_action.clipped,
                         "observation_state": np.asarray(observation_state, dtype=np.float64).tolist(),
+                        "motion_limiter_enabled": limiter_enabled,
+                        "motion_limited_mask": motion_limited_mask.tolist(),
+                        "motion_limit_amount": motion_limit_amount.astype(np.float64).tolist(),
+                        "reference_velocity_rad_s": reference_velocity.astype(np.float64).tolist(),
+                        "actual_qpos_after": np.asarray(actual_state_after[:6], dtype=np.float64).tolist(),
+                        "actual_qvel_after": env.get_arm_qvel().astype(np.float64).tolist(),
+                        "ee_position_after": env.get_end_effector_position().astype(np.float64).tolist(),
                     },
                 )
-                env.apply_joint_action(safe_action.command, physics_steps=physics_steps)
                 completed_steps = step_index + 1
                 evaluation = env.evaluate_task(spec.task_id, completed_steps / fps, max_steps / fps)
                 failure_mode = evaluation.failure_mode
@@ -580,10 +640,11 @@ def build_manifest(
     chunk_size: int,
     appearance_variant: str,
     appearance_texture_sha256: str,
+    motion_limiter: dict[str, Any],
 ) -> dict[str, Any]:
     """构造用于恢复校验的完整运行清单。"""
     return {
-        "schema_version": 3,
+        "schema_version": 4,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "checkpoint_path": str(checkpoint.resolve()),
         "checkpoint_sha256": checkpoint_sha256,
@@ -597,6 +658,7 @@ def build_manifest(
         "execution_horizon": execution_horizon,
         "appearance_variant": appearance_variant,
         "appearance_texture_sha256": appearance_texture_sha256,
+        "motion_limiter": motion_limiter,
         "keep_all_videos": keep_all_videos,
         "config": config,
         "rollout_count": len(specs),
@@ -624,6 +686,7 @@ def manifest_identity(manifest: dict[str, Any]) -> dict[str, Any]:
         "execution_horizon",
         "appearance_variant",
         "appearance_texture_sha256",
+        "motion_limiter",
         "keep_all_videos",
     )
     return {key: manifest.get(key) for key in keys}
@@ -679,10 +742,16 @@ def update_manifest_identity(manifest: dict[str, Any]) -> dict[str, Any]:
         "execution_horizon",
         "appearance_variant",
         "appearance_texture_sha256",
+        "motion_limiter",
         "keep_all_videos",
         "config",
     )
-    return {key: manifest.get(key) for key in keys}
+    identity = {key: manifest.get(key) for key in keys}
+    # schema_version=3及更早版本尚未记录motion_limiter。缺失字段与当前
+    # 配置未启用限制器完全等价，避免为默认值升级错误拒绝失败项重跑。
+    if identity["motion_limiter"] is None:
+        identity["motion_limiter"] = {"enabled": False}
+    return identity
 
 
 def prepare_failure_update(
@@ -953,6 +1022,128 @@ def write_action_clipping_outputs(output_dir: Path, results: list[RolloutResult]
     return clipping
 
 
+def _trace_motion_rows(result: RolloutResult, fps: int) -> dict[str, Any] | None:
+    """从一条含执行后遥测的动作日志计算整轨迹平滑度指标。"""
+    if not result.action_trace_path:
+        return None
+    path = Path(result.action_trace_path)
+    records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    if not records or "actual_qpos_after" not in records[0]:
+        return None
+    qpos = np.asarray([record["actual_qpos_after"] for record in records], dtype=np.float64)
+    position = np.asarray([record["ee_position_after"] for record in records], dtype=np.float64)
+    qvel = np.asarray([record["actual_qvel_after"] for record in records], dtype=np.float64)
+    if qpos.ndim != 2 or qpos.shape[1] != 6 or position.ndim != 2 or position.shape[1] != 3:
+        raise ValueError(f"{path.name}的运动遥测维度错误")
+    if qvel.shape != qpos.shape or not (np.isfinite(qpos).all() and np.isfinite(position).all() and np.isfinite(qvel).all()):
+        raise ValueError(f"{path.name}的运动遥测包含无效数值")
+    dt = 1.0 / fps
+    delta_q = np.linalg.norm(np.diff(qpos, axis=0), axis=1)
+    delta2_q = np.linalg.norm(qpos[2:] - 2.0 * qpos[1:-1] + qpos[:-2], axis=1)
+    speed = np.linalg.norm(np.diff(position, axis=0), axis=1) / dt
+    jerk = np.linalg.norm(
+        position[3:] - 3.0 * position[2:-1] + 3.0 * position[1:-2] - position[:-3],
+        axis=1,
+    ) / (dt**3)
+    boundary = np.asarray(
+        [delta_q[index - 1] for index in range(1, len(records)) if bool(records[index].get("chunk_start", False))],
+        dtype=np.float64,
+    )
+    interior = np.asarray(
+        [delta_q[index - 1] for index in range(1, len(records)) if not bool(records[index].get("chunk_start", False))],
+        dtype=np.float64,
+    )
+    gripper_closed = np.asarray([float(record["executed_action"][6]) >= 0.5 for record in records], dtype=np.bool_)
+    toggles = int(np.count_nonzero(gripper_closed[1:] != gripper_closed[:-1]))
+    return {
+        "rollout_key": result.rollout_key,
+        "scene_seed": result.scene_seed,
+        "task_id": result.task_id,
+        "success": result.success,
+        "steps": result.steps,
+        "mean_delta_q_rad": float(np.mean(delta_q)) if delta_q.size else 0.0,
+        "p95_delta_q_rad": percentile(delta_q, 95),
+        "mean_delta2_q_rad": float(np.mean(delta2_q)) if delta2_q.size else 0.0,
+        "p95_delta2_q_rad": percentile(delta2_q, 95),
+        "mean_ee_speed_m_s": float(np.mean(speed)) if speed.size else 0.0,
+        "p95_ee_speed_m_s": percentile(speed, 95),
+        "mean_ee_jerk_m_s3": float(np.mean(jerk)) if jerk.size else 0.0,
+        "p95_ee_jerk_m_s3": percentile(jerk, 95),
+        "chunk_boundary_count": int(boundary.size),
+        "mean_chunk_boundary_jump_rad": float(np.mean(boundary)) if boundary.size else 0.0,
+        "p95_chunk_boundary_jump_rad": percentile(boundary, 95),
+        "mean_non_boundary_jump_rad": float(np.mean(interior)) if interior.size else 0.0,
+        "chunk_boundary_jump_ratio": (
+            float(np.mean(boundary) / np.mean(interior)) if boundary.size and interior.size and float(np.mean(interior)) > 0.0 else 0.0
+        ),
+        "gripper_toggle_count": toggles,
+        "gripper_excess_toggle_count": max(0, toggles - 2),
+    }
+
+
+def _bootstrap_motion_ci(rows: list[dict[str, Any]], field: str, repeats: int = 10_000) -> list[float]:
+    """按scene分层重采样计算一个逐轨迹指标中位数的置信区间。"""
+    if not rows:
+        return [0.0, 0.0]
+    grouped = {
+        scene: np.asarray([float(row[field]) for row in rows if int(row["scene_seed"]) == scene], dtype=np.float64)
+        for scene in sorted({int(row["scene_seed"]) for row in rows})
+    }
+    scenes = np.asarray(list(grouped), dtype=np.int64)
+    rng = np.random.default_rng(20260818)
+    samples = np.empty(repeats, dtype=np.float64)
+    for index in range(repeats):
+        chosen = rng.choice(scenes, size=len(scenes), replace=True)
+        samples[index] = float(np.median(np.concatenate([grouped[int(scene)] for scene in chosen])))
+    return [float(np.percentile(samples, 2.5)), float(np.percentile(samples, 97.5))]
+
+
+def write_motion_metrics_outputs(output_dir: Path, results: list[RolloutResult], fps: int) -> dict[str, Any]:
+    """写出逐轨迹平滑度CSV、总体JSON和中文Markdown报告。"""
+    rows = [row for result in results if (row := _trace_motion_rows(result, fps)) is not None]
+    fields = (
+        "mean_delta_q_rad", "p95_delta_q_rad", "mean_delta2_q_rad", "p95_delta2_q_rad",
+        "mean_ee_speed_m_s", "p95_ee_speed_m_s", "mean_ee_jerk_m_s3", "p95_ee_jerk_m_s3",
+        "mean_chunk_boundary_jump_rad", "p95_chunk_boundary_jump_rad", "chunk_boundary_jump_ratio",
+        "gripper_toggle_count", "gripper_excess_toggle_count",
+    )
+    summary = {
+        "schema_version": 1,
+        "fps": fps,
+        "telemetry_rollouts": len(rows),
+        "result_rollouts": len(results),
+        "metrics": {
+            field: {
+                "median": float(np.median([float(row[field]) for row in rows])) if rows else 0.0,
+                "scene_bootstrap_ci95": _bootstrap_motion_ci(rows, field),
+            }
+            for field in fields
+        },
+    }
+    with (output_dir / MOTION_METRICS_CSV).open("w", encoding="utf-8-sig", newline="") as csv_file:
+        fieldnames = list(rows[0].keys()) if rows else ["rollout_key", "scene_seed", *fields]
+        writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    write_json(output_dir / MOTION_METRICS_JSON, summary)
+    metrics = summary["metrics"]
+    lines = [
+        "# SmolVLA 闭环轨迹平滑度报告",
+        "",
+        f"- 含执行后遥测的轨迹：{len(rows)}/{len(results)}",
+        f"- 控制频率：{fps} Hz",
+        "",
+        "| 指标 | 逐轨迹中位数 | Scene Bootstrap 95% CI |",
+        "| --- | ---: | --- |",
+    ]
+    for field in fields:
+        value = metrics[field]
+        ci = value["scene_bootstrap_ci95"]
+        lines.append(f"| {field} | {value['median']:.8g} | [{ci[0]:.8g}, {ci[1]:.8g}] |")
+    (output_dir / MOTION_METRICS_REPORT).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return summary
+
+
 def summarize_results(results: list[RolloutResult]) -> dict[str, Any]:
     """生成总体、分组、稳定性、动作和延迟统计。"""
     successful = [result for result in results if result.success]
@@ -1117,6 +1308,11 @@ def write_results(
         writer.writerows(asdict(result) for result in results)
     summary = summarize_results(results)
     summary["action_clipping"] = write_action_clipping_outputs(output_dir, results)
+    summary["motion_metrics"] = write_motion_metrics_outputs(
+        output_dir,
+        results,
+        int(manifest.get("fps", 20)) if manifest is not None else 20,
+    )
     write_json(output_dir / "summary.json", summary)
     if manifest is not None:
         write_report(output_dir / "report.md", summary, manifest, update_info)
@@ -1142,6 +1338,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     max_steps = args.max_steps if args.max_steps is not None else int(evaluation.get("max_steps", 400))
     if fps <= 0 or max_steps <= 0:
         raise ValueError("fps和max_steps必须大于零")
+    motion_limiter = resolve_motion_limiter(evaluation, fps)
     execution_horizon, chunk_size = resolve_execution_horizon(
         checkpoint,
         evaluation,
@@ -1174,11 +1371,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.device,
         fps,
         max_steps,
-        args.keep_all_videos,
+        not args.prune_videos,
         execution_horizon,
         chunk_size,
         appearance_variant,
         appearance_texture_sha256,
+        motion_limiter,
     )
     update_info: dict[str, Any] | None = None
     if args.rerun_failures:
@@ -1227,6 +1425,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 execution_horizon,
                 environment,
                 appearance_variant,
+                motion_limiter,
             )
             if args.rerun_failures:
                 rerun_results.append(result)
@@ -1257,7 +1456,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if len(results) != len(expected_specs):
         raise RuntimeError(f"评测结果不完整: expected={len(expected_specs)}, actual={len(results)}")
     validate_completed_results(results)
-    retain_videos(output_dir, results, args.keep_all_videos)
+    retain_videos(output_dir, results, not args.prune_videos)
     rewrite_jsonl(output_dir / RESULTS_JSONL, results)
     if update_info is not None:
         write_json(output_dir / UPDATE_JSON, update_info)

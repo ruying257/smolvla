@@ -165,6 +165,31 @@ conda activate smolvla-eval
 
 杯子任务仍使用400步（20秒）超时和严格成功条件：杯子中心进入目标区内缩1厘米边界、保持直立稳定0.5秒并释放夹爪。结果目录中的`rollouts.csv`、`summary.json`、`report.md`、`action_traces/`和视频分别用于统计、失败分类、动作裁剪和人工复核；它们只代表本机MuJoCo杯子场景，不外推为真实机器人成功率。
 
+### 3.2.1 h20关节速度/加速度限制器对照
+
+限制器只作用于评测执行时的六个关节绝对目标，不修改训练数据、模型权重或夹爪指令。先从完整杯子专家数据生成锁定的`p99 × 1.1`限制文件：
+
+```powershell
+conda activate smolvla-eval
+python scripts\calibrate_motion_limits.py `
+  --dataset-root smolvla-data\smolvla_ur10e_mug_v1 `
+  --output configs\motion_limits\mug_v1_p99x1.1.json
+```
+
+随后使用相同的20个seen scene、两个任务、固定policy seed和`execution_horizon=20`分别运行基线与限制器；两个输出目录不得混用或覆盖：
+
+```powershell
+.\evaluate\run.ps1 `
+  --checkpoint outputs\train\smolvla_ur10e_mug_v1_b8_s8000\checkpoints\008000\pretrained_model `
+  --config configs\eval\mug_v1_seen_h20_baseline.yaml
+
+.\evaluate\run.ps1 `
+  --checkpoint outputs\train\smolvla_ur10e_mug_v1_b8_s8000\checkpoints\008000\pretrained_model `
+  --config configs\eval\mug_v1_seen_h20_motion_limiter.yaml
+```
+
+每条动作日志会记录范围裁剪后动作、限制器最终执行动作、参考速度，以及物理推进后的实际关节位置/速度和末端位置。结果目录新增`motion_metrics_by_rollout.csv`、`motion_metrics_summary.json`与`motion_metrics_report.md`；正式比较以逐轨迹中位数和scene-bootstrap区间为准，不应只比较单条视频。
+
 ### 3.3 Execution horizon=10诊断实验
 
 SmolVLA checkpoint保持`chunk_size=50`。增加`--execution-horizon 10`后，每次仍生成50步动作，但只执行前10步，随后使用最新图像和状态重新生成chunk。该模式属于Receding Horizon，不对重叠chunk求平均，也不是RTC。
