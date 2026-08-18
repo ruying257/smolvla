@@ -1,0 +1,38 @@
+# mug_v1本机未见场景评测：20个未参与训练的共享scene × 2个目标任务 × canonical。
+# seed使用真实MugTabletopEnv.reset()在[0,10000)候选池中筛选；排除20个训练seed，
+# 再按4×5空间网格每格选择一个合法、靠近格中心且相互至少相隔4cm的布局。
+# policy_seed固定20260，仅用于复现Flow Matching采样；每条轨迹最多360步（18秒）。
+evaluation:
+  environment: mug
+  output_dir: outputs/eval/mug_v1_unseen_canonical
+  fps: 20
+  max_steps: 360
+  scene_seeds:
+    - 9201
+    - 3132
+    - 6943
+    - 2277
+    - 6343
+    - 6043
+    - 8846
+    - 3174
+    - 2076
+    - 5724
+    - 8320
+    - 9165
+    - 2721
+    - 9162
+    - 4175
+    - 8848
+    - 7149
+    - 7586
+    - 1323
+    - 8780
+
+  task_ids:
+    - mug_on_blue
+    - mug_on_yellow
+  prompt_types:
+    - canonical
+  policy_seeds:
+    - 20260

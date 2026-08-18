@@ -24,10 +24,12 @@ from evaluate.rollout import (
     build_prompt,
     build_specs,
     load_jsonl,
+    prepare_failure_update,
     prepare_run,
     retain_videos,
     resolve_execution_horizon,
     run_single_rollout,
+    select_scene_specs,
     set_policy_seed,
     source_sha256,
     summarize_action_clipping,
@@ -101,6 +103,16 @@ class EvaluationContractTests(unittest.TestCase):
         self.assertEqual(args.device, "cuda")
         self.assertFalse(args.resume)
         self.assertIsNone(args.execution_horizon)
+        self.assertIsNone(args.scene_seed)
+
+    def test_scene_seed_filter_keeps_all_config_dimensions(self) -> None:
+        """单场景参数应只收缩场景维度，保留任务、措辞和policy seed。"""
+        evaluation = load_yaml_config(PROJECT_ROOT / "configs" / "eval_seen.yaml")["evaluation"]
+        selected = select_scene_specs(build_specs(evaluation), 3)
+        self.assertEqual(len(selected), 4)
+        self.assertEqual({spec.scene_seed for spec in selected}, {3})
+        with self.assertRaisesRegex(ValueError, "不在配置场景中"):
+            select_scene_specs(build_specs(evaluation), 99999)
 
     def test_source_hash_uses_current_collector_task_definition(self) -> None:
         """采集目录重组后，评测源码哈希仍应读取实际任务定义。"""
@@ -136,6 +148,17 @@ class EvaluationContractTests(unittest.TestCase):
         self.assertEqual(seen["scene_seeds"], [0, 1, 2, 3, 4, 5])
         self.assertEqual(seen["prompt_types"], ["canonical"])
         self.assertEqual(seen["policy_seeds"], [20260])
+
+    def test_green_mug_smoke_config_is_locked_to_four_h25_rollouts(self) -> None:
+        """绿白杯实验应只包含两个seen场景和两个canonical任务。"""
+        evaluation = load_yaml_config(
+            PROJECT_ROOT / "configs" / "eval" / "mug_v1_seen_green_2seeds.yaml"
+        )["evaluation"]
+        specs = build_specs(evaluation)
+        self.assertEqual(len(specs), 4)
+        self.assertEqual({spec.scene_seed for spec in specs}, {2291, 6705})
+        self.assertEqual(evaluation["appearance_variant"], "green_white")
+        self.assertEqual(evaluation["execution_horizon"], 25)
 
     def test_checkpoint_locator_accepts_only_complete_model(self) -> None:
         """只有配置、权重和处理器齐全的目录才能用于评测。"""
@@ -180,6 +203,34 @@ class EvaluationContractTests(unittest.TestCase):
         second = (np.random.random(3), torch.randn(3))
         np.testing.assert_allclose(first[0], second[0])
         self.assertTrue(torch.equal(first[1], second[1]))
+
+    def test_prepare_failure_update_accepts_legacy_results_and_rejects_mismatch(self) -> None:
+        """失败项更新应接受无manifest旧目录，但拒绝实验键或权重不一致。"""
+        with workspace_temp_dir() as output:
+            specs = [
+                RolloutSpec(1, "red_on_blue", "canonical", 20260),
+                RolloutSpec(2, "red_on_blue", "canonical", 20260),
+            ]
+            first = fake_result(output, 1, 20260, "red_on_blue", "canonical", True)
+            second = fake_result(output, 2, 20260, "red_on_blue", "canonical", False)
+            first.checkpoint_sha256 = "checkpoint-a"
+            second.checkpoint_sha256 = "checkpoint-a"
+            append_jsonl(output / "rollouts.jsonl", first)
+            append_jsonl(output / "rollouts.jsonl", second)
+            manifest = {"checkpoint_sha256": "checkpoint-a"}
+            results, failures, legacy = prepare_failure_update(
+                output,
+                manifest,
+                specs,
+                "checkpoint-a",
+            )
+            self.assertEqual(len(results), 2)
+            self.assertEqual([result.rollout_key for result in failures], [second.rollout_key])
+            self.assertTrue(legacy)
+            with self.assertRaisesRegex(ValueError, "checkpoint哈希"):
+                prepare_failure_update(output, manifest, specs, "checkpoint-b")
+            with self.assertRaisesRegex(ValueError, "实验键不一致"):
+                prepare_failure_update(output, manifest, specs[:1], "checkpoint-a")
 
 
 class FakePolicy:

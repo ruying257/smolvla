@@ -1,6 +1,6 @@
 # SmolVLA UR10e MuJoCo 数据采集项目
 
-本项目以 ACT 的 `mode/demo_scene.xml`、键盘控制和数据采集流程为参考，在项目内独立提供 UR10e 双积木语言任务环境、20 Hz专家采集和LeRobot v3数据回放。杯子和盘子已删除，运行时不依赖ACT项目路径。
+本项目以 ACT 的 `mode/demo_scene.xml`、键盘控制和数据采集流程为参考，在项目内独立提供 UR10e 双积木语言任务环境、20 Hz专家采集和LeRobot v3数据回放。原积木场景不包含杯盘；项目另行提供一个互不影响的单杯子双放置区场景。两个场景运行时都不依赖ACT项目路径。
 
 ## 场景布局
 
@@ -60,6 +60,31 @@ python view_scene.py --no-camera-panel
 ```powershell
 python view_scene.py --scene-seed 7
 ```
+
+## 独立杯子场景
+
+杯子场景与原双积木场景并行存在，不修改原 `scene.xml`、`CleanTabletopEnv`、采集器或评测器。杯子使用ACT `mug_5/model_new.xml` 的视觉网格、纹理和32个碰撞网格，蓝黄放置区域的位置、尺寸及颜色与积木场景一致。
+
+杯子场景使用已有的 `smolvla-collector-clean` 环境：
+
+```powershell
+conda activate smolvla-collector-clean
+python view_mug_scene.py
+```
+
+指定可复现的杯子布局：
+
+```powershell
+python view_mug_scene.py --scene-seed 7
+```
+
+执行无窗口检查：
+
+```powershell
+python view_mug_scene.py --headless --steps 10 --scene-seed 7
+```
+
+杯子按seed在 `x=[0.25,0.39]`、`y=[-0.35,0.35]` 内随机生成，从 `z=0.86` 落下并自动稳定250个物理步。新核心环境支持 `mug_on_blue` 和 `mug_on_yellow` 两个任务；成功要求杯子中心进入目标区内缩1厘米后的边界、保持直立稳定0.5秒并松开夹爪。V3采用20个共享scene、蓝黄canonical配对和20 Hz确定性动作回放验收，完整命令见[杯子V3数据采集与验收](Mug_v3数据采集与验收.md)。
 
 ## 采集专家数据
 
@@ -140,7 +165,7 @@ python -m scripts.verify_act_layout `
 - `assets/mujoco/`：项目独立运行所需的XML、mesh和纹理。
 - `assets/licenses/SOURCE_AND_LICENSE.md`：资源来源和许可证说明。
 - `assets/licenses/asset_manifest.json`：逐文件大小、SHA-256和复制状态。
-- `sim/`：随机任务环境、严格成功判定及MuJoCo内部多相机Viewer。
+- `sim/`：相互独立的积木/杯子环境、严格成功判定及MuJoCo内部多相机Viewer。
 - `collector/`：IK遥操作、采集状态机、LeRobot写入和视频回放。
 - `scripts/`：资源清单和ACT位姿等价性验证。
 - `tests/`：模型、任务物体、稳定性、相机和注释回归测试。

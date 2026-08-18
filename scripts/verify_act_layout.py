@@ -43,7 +43,7 @@ def _build_source_model(source_root: Path) -> mujoco.MjModel:
     scene_xml = re.sub(r"[ \t]*#.*", "", scene_xml)
     robot_xml = robot_path.read_text(encoding="utf-8").replace(
         '<compiler angle="radian" meshdir="assets" autolimits="true"/>',
-        source_root / "tabletop" / "object" / "floor_isaac_style.xml",
+        '<compiler angle="radian" autolimits="true"/>',
     )
 
     required_files = [

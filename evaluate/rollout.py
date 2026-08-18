@@ -33,12 +33,18 @@ from evaluate.common import (
     write_json,
 )
 from sim.environment import CleanTabletopEnv
+from sim.mug_environment import MUG_TASK_IDS, MugTabletopEnv, resolve_mug_texture_path
 
 
 TASKS = task_spec_module.TASKS
+MUG_PROMPTS = {
+    "mug_on_blue": "Put the mug on the blue pad.",
+    "mug_on_yellow": "Put the mug on the yellow pad.",
+}
 UNSEEN_TEMPLATE = "Move the {cube_color} cube to the {pad_color} pad."
 RESULTS_JSONL = "rollouts.jsonl"
 MANIFEST_JSON = "run_manifest.json"
+UPDATE_JSON = "rollout_update.json"
 ACTION_TRACE_DIR = "action_traces"
 ACTION_CLIPPING_JSON = "action_clipping_summary.json"
 ACTION_CLIPPING_CSV = "action_clipping_by_dimension.csv"
@@ -106,6 +112,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--output-dir", type=Path, help="覆盖配置中的评测输出目录")
     parser.add_argument("--device", default="cuda", help="策略推理设备")
+    parser.add_argument(
+        "--scene-seed",
+        type=int,
+        help="只评测配置中指定的一个scene seed；保留该配置的全部任务、措辞和policy seed",
+    )
     parser.add_argument("--max-rollouts", type=int, help="只执行前 N 条 rollout，用于 smoke test")
     parser.add_argument("--max-steps", type=int, help="覆盖每条 rollout 的最大控制步数")
     parser.add_argument(
@@ -114,6 +125,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="每个动作chunk实际执行的步数；例如10表示预测50步但只执行前10步后重规划",
     )
     parser.add_argument("--resume", action="store_true", help="校验manifest后续跑未完成或异常轨迹")
+    parser.add_argument(
+        "--rerun-failures",
+        action="store_true",
+        help="覆盖更新已有结果中的全部失败rollout；不可与--resume、--scene-seed或--max-rollouts组合",
+    )
     parser.add_argument("--keep-all-videos", action="store_true", help="保留全部成功与失败视频")
     return parser
 
@@ -128,6 +144,10 @@ def build_prompt(task_id: str, prompt_type: str) -> str:
     Returns:
         英文任务指令。
     """
+    if task_id in MUG_PROMPTS:
+        if prompt_type != "canonical":
+            raise ValueError("杯子评测目前只支持训练使用的canonical措辞")
+        return MUG_PROMPTS[task_id]
     task = TASKS[task_id]
     if prompt_type in {"canonical", "synonym"}:
         return task.prompt(prompt_type)
@@ -276,6 +296,8 @@ def run_single_rollout(
     device: str,
     checkpoint_sha256: str,
     execution_horizon: int = 50,
+    environment: str = "cube",
+    appearance_variant: str = "original",
 ) -> RolloutResult:
     """执行一条固定场景和模型随机种子的闭环rollout。
 
@@ -290,6 +312,8 @@ def run_single_rollout(
         device: 策略推理设备。
         checkpoint_sha256: 模型权重SHA-256。
         execution_horizon: 每个预测chunk实际执行的步数。
+        environment: ``cube``或``mug``仿真环境。
+        appearance_variant: 杯子环境使用的视觉外观变体。
 
     Returns:
         单条闭环评测结果。
@@ -321,7 +345,12 @@ def run_single_rollout(
                     f"execution_horizon不能超过模型chunk_size: {execution_horizon} > {chunk_size}"
                 )
             policy.config.n_action_steps = execution_horizon
-        with CleanTabletopEnv() as env, imageio.get_writer(
+        env_context = (
+            MugTabletopEnv(appearance_variant=appearance_variant)
+            if environment == "mug"
+            else CleanTabletopEnv()
+        )
+        with env_context as env, imageio.get_writer(
             video_path,
             fps=fps,
             codec="libx264",
@@ -423,11 +452,18 @@ def build_specs(evaluation: dict[str, Any], max_rollouts: int | None = None) -> 
         有序实验条件列表。
     """
     scene_seeds = [int(value) for value in evaluation.get("scene_seeds", [10000])]
-    task_ids = [str(value) for value in evaluation.get("task_ids", TASKS)]
+    environment = str(evaluation.get("environment", "cube"))
+    if environment not in {"cube", "mug"}:
+        raise ValueError(f"未知评测环境: {environment!r}，可选值为cube或mug")
+    default_tasks = MUG_TASK_IDS if environment == "mug" else tuple(TASKS)
+    task_ids = [str(value) for value in evaluation.get("task_ids", default_tasks)]
     prompt_types = [str(value) for value in evaluation.get("prompt_types", ["canonical"])]
     policy_seeds = [int(value) for value in evaluation.get("policy_seeds", [20260])]
-    if any(task_id not in TASKS for task_id in task_ids):
+    valid_tasks = set(MUG_TASK_IDS if environment == "mug" else TASKS)
+    if any(task_id not in valid_tasks for task_id in task_ids):
         raise ValueError(f"评测包含未知任务: {task_ids}")
+    if environment == "mug" and any(prompt != "canonical" for prompt in prompt_types):
+        raise ValueError("杯子环境目前只支持canonical措辞")
     if any(prompt not in {"canonical", "synonym", "unseen"} for prompt in prompt_types):
         raise ValueError(f"评测包含未知措辞: {prompt_types}")
     dimensions = (scene_seeds, task_ids, prompt_types, policy_seeds)
@@ -449,6 +485,28 @@ def build_specs(evaluation: dict[str, Any], max_rollouts: int | None = None) -> 
     return specs
 
 
+def select_scene_specs(specs: Sequence[RolloutSpec], scene_seed: int | None) -> list[RolloutSpec]:
+    """按命令行指定的单个场景筛选评测组合。
+
+    Args:
+        specs: 已由配置展开且完成唯一性校验的评测组合。
+        scene_seed: 需要保留的场景种子；为None时保持全部组合。
+
+    Returns:
+        筛选后的评测组合。指定seed时保留该seed下全部任务、措辞和policy seed。
+
+    Raises:
+        ValueError: 指定的seed不属于配置中的scene_seeds时抛出。
+    """
+    if scene_seed is None:
+        return list(specs)
+    selected = [spec for spec in specs if spec.scene_seed == scene_seed]
+    if not selected:
+        available = sorted({spec.scene_seed for spec in specs})
+        raise ValueError(f"scene-seed={scene_seed}不在配置场景中，可选值: {available}")
+    return selected
+
+
 def sha256_file(path: Path) -> str:
     """流式计算大文件SHA-256。"""
     digest = hashlib.sha256()
@@ -464,7 +522,9 @@ def source_sha256() -> str:
     task_spec_path = Path(task_spec_module.__file__).resolve()
     paths = sorted((PROJECT_ROOT / "evaluate").glob("*.py")) + [
         PROJECT_ROOT / "sim" / "environment.py",
+        PROJECT_ROOT / "sim" / "mug_environment.py",
         task_spec_path,
+        PROJECT_ROOT / "collector" / "v3" / "task_spec.py",
     ]
     for path in paths:
         digest.update(str(path.relative_to(PROJECT_ROOT)).encode("utf-8"))
@@ -518,10 +578,12 @@ def build_manifest(
     keep_all_videos: bool,
     execution_horizon: int,
     chunk_size: int,
+    appearance_variant: str,
+    appearance_texture_sha256: str,
 ) -> dict[str, Any]:
     """构造用于恢复校验的完整运行清单。"""
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "checkpoint_path": str(checkpoint.resolve()),
         "checkpoint_sha256": checkpoint_sha256,
@@ -533,6 +595,8 @@ def build_manifest(
         "max_steps": max_steps,
         "chunk_size": chunk_size,
         "execution_horizon": execution_horizon,
+        "appearance_variant": appearance_variant,
+        "appearance_texture_sha256": appearance_texture_sha256,
         "keep_all_videos": keep_all_videos,
         "config": config,
         "rollout_count": len(specs),
@@ -558,6 +622,8 @@ def manifest_identity(manifest: dict[str, Any]) -> dict[str, Any]:
         "max_steps",
         "chunk_size",
         "execution_horizon",
+        "appearance_variant",
+        "appearance_texture_sha256",
         "keep_all_videos",
     )
     return {key: manifest.get(key) for key in keys}
@@ -585,6 +651,109 @@ def prepare_run(output_dir: Path, manifest: dict[str, Any], resume: bool) -> lis
     if retryable:
         rewrite_jsonl(journal_path, valid)
     return valid
+
+
+def artifact_paths(output_dir: Path, spec: RolloutSpec) -> tuple[Path, Path]:
+    """返回一条rollout在当前输出目录中的视频和动作日志路径。"""
+    stem = rollout_artifact_stem(spec)
+    return (
+        output_dir / "videos" / f"{stem}.mp4",
+        output_dir / ACTION_TRACE_DIR / f"{stem}.jsonl",
+    )
+
+
+def update_manifest_identity(manifest: dict[str, Any]) -> dict[str, Any]:
+    """提取失败项重跑时必须保持一致的运行身份。
+
+    成功判据修订会自然改变源码哈希，因此更新模式故意不比较
+    ``source_sha256``；其余checkpoint、环境、配置和执行参数必须不变。
+    """
+    keys = (
+        "checkpoint_path",
+        "checkpoint_sha256",
+        "environment",
+        "amp_enabled",
+        "fps",
+        "max_steps",
+        "chunk_size",
+        "execution_horizon",
+        "appearance_variant",
+        "appearance_texture_sha256",
+        "keep_all_videos",
+        "config",
+    )
+    return {key: manifest.get(key) for key in keys}
+
+
+def prepare_failure_update(
+    output_dir: Path,
+    manifest: dict[str, Any],
+    specs: Sequence[RolloutSpec],
+    checkpoint_sha256: str,
+) -> tuple[list[RolloutResult], list[RolloutResult], bool]:
+    """加载并校验待覆盖更新的历史结果。
+
+    Args:
+        output_dir: 已有评测结果目录。
+        manifest: 当前命令构造的运行清单。
+        specs: 当前配置完整展开后的实验矩阵。
+        checkpoint_sha256: 当前checkpoint权重哈希。
+
+    Returns:
+        ``(全部旧结果, 旧失败结果, legacy_without_manifest)``。
+
+    Raises:
+        FileNotFoundError: 目录或结果日志不存在时抛出。
+        ValueError: 实验键、checkpoint或已有manifest身份不一致时抛出。
+    """
+    journal_path = output_dir / RESULTS_JSONL
+    if not output_dir.is_dir() or not journal_path.is_file():
+        raise FileNotFoundError(f"失败项更新需要已有{RESULTS_JSONL}: {output_dir}")
+    existing_results = load_jsonl(journal_path)
+    expected_keys = {spec.key for spec in specs}
+    existing_keys = {result.rollout_key for result in existing_results}
+    if existing_keys != expected_keys:
+        missing = sorted(expected_keys - existing_keys)
+        extra = sorted(existing_keys - expected_keys)
+        raise ValueError(f"已有结果与当前配置实验键不一致: missing={missing}, extra={extra}")
+    checkpoint_hashes = {result.checkpoint_sha256 for result in existing_results}
+    if checkpoint_hashes != {checkpoint_sha256}:
+        raise ValueError(
+            f"已有结果checkpoint哈希与当前输入不一致: existing={sorted(checkpoint_hashes)}, "
+            f"current={checkpoint_sha256}"
+        )
+
+    manifest_path = output_dir / MANIFEST_JSON
+    legacy_without_manifest = not manifest_path.is_file()
+    if not legacy_without_manifest:
+        existing_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if update_manifest_identity(existing_manifest) != update_manifest_identity(manifest):
+            raise ValueError("已有manifest与当前checkpoint、配置、execution horizon或环境不一致")
+    failures = [result for result in existing_results if not result.success]
+    return existing_results, failures, legacy_without_manifest
+
+
+def repair_legacy_artifact_paths(output_dir: Path, results: Sequence[RolloutResult]) -> None:
+    """把历史结果中指向已迁移目录的产物路径修正到当前目录。
+
+    只在当前目录存在同名产物、而历史路径缺失时修正，不会触碰外部目录。
+    """
+    for result in results:
+        spec = RolloutSpec(result.scene_seed, result.task_id, result.prompt_type, result.policy_seed)
+        video, trace = artifact_paths(output_dir, spec)
+        if result.action_trace_path and not Path(result.action_trace_path).is_file() and trace.is_file():
+            result.action_trace_path = str(trace.resolve())
+        if result.video_retained and result.video_path and not Path(result.video_path).is_file() and video.is_file():
+            result.video_path = str(video.resolve())
+
+
+def remove_failure_artifacts(output_dir: Path, failures: Sequence[RolloutResult]) -> None:
+    """删除待重跑失败项在当前结果目录中的旧视频和动作日志。"""
+    for result in failures:
+        spec = RolloutSpec(result.scene_seed, result.task_id, result.prompt_type, result.policy_seed)
+        for path in artifact_paths(output_dir, spec):
+            if path.is_file():
+                path.unlink()
 
 
 def load_jsonl(path: Path) -> list[RolloutResult]:
@@ -854,7 +1023,8 @@ def retain_videos(output_dir: Path, results: list[RolloutResult], keep_all: bool
             result.video_retained = True
             retained.append(result.rollout_key)
         else:
-            if video.exists():
+            # video_path 为空时 Path("") 会指向当前目录，需跳过
+            if result.video_path and video.is_file():
                 video.unlink()
             result.video_retained = False
             result.video_path = ""
@@ -864,7 +1034,12 @@ def retain_videos(output_dir: Path, results: list[RolloutResult], keep_all: bool
     return manifest
 
 
-def write_report(path: Path, summary: dict[str, Any], manifest: dict[str, Any]) -> None:
+def write_report(
+    path: Path,
+    summary: dict[str, Any],
+    manifest: dict[str, Any],
+    update_info: dict[str, Any] | None = None,
+) -> None:
     """生成便于人工阅读和归档的Markdown评测报告。"""
     ci = summary["success_rate_ci95_scene_bootstrap"]
     lines = [
@@ -880,6 +1055,8 @@ def write_report(path: Path, summary: dict[str, Any], manifest: dict[str, Any]) 
         f"- 语言泛化差距：{summary['language_generalization_gap']:.2%}",
         f"- 控制异常：{summary['control_exceptions']}",
         f"- Execution horizon：{manifest.get('execution_horizon', 'unknown')}步",
+        f"- 杯子外观：`{manifest.get('appearance_variant', 'original')}`",
+        f"- 外观纹理SHA-256：`{manifest.get('appearance_texture_sha256', 'not_applicable')}`",
         "",
         "## 分任务成功率",
         "",
@@ -908,11 +1085,28 @@ def write_report(path: Path, summary: dict[str, Any], manifest: dict[str, Any]) 
             f"| {item['name']} | {item['clipped_steps']} | {item['clipped_step_rate']:.2%} | "
             f"{item['mean_normalized_excess_when_clipped']:.6f} | {item['max_normalized_excess']:.6f} |"
         )
+    if update_info is not None:
+        lines.extend(
+            [
+                "",
+                "## 数据更新说明",
+                "",
+                "- 本结果仅重跑并替换了历史失败rollout；原成功rollout未重新执行。",
+                f"- 重跑失败项：{len(update_info['replayed_rollout_keys'])} 条。",
+                f"- 原目录缺少manifest：{'是' if update_info['legacy_without_manifest'] else '否'}。",
+                f"- 更新审计：`{UPDATE_JSON}`。",
+            ]
+        )
     lines.extend(["", "## 结果边界", "", "结果仅代表本机MuJoCo仿真闭环能力，不代表真实UR10e成功率。"])
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def write_results(output_dir: Path, results: list[RolloutResult], manifest: dict[str, Any] | None = None) -> dict[str, Any]:
+def write_results(
+    output_dir: Path,
+    results: list[RolloutResult],
+    manifest: dict[str, Any] | None = None,
+    update_info: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """写出CSV、汇总JSON和Markdown报告。"""
     output_dir.mkdir(parents=True, exist_ok=True)
     csv_path = output_dir / "rollouts.csv"
@@ -925,13 +1119,19 @@ def write_results(output_dir: Path, results: list[RolloutResult], manifest: dict
     summary["action_clipping"] = write_action_clipping_outputs(output_dir, results)
     write_json(output_dir / "summary.json", summary)
     if manifest is not None:
-        write_report(output_dir / "report.md", summary, manifest)
+        write_report(output_dir / "report.md", summary, manifest, update_info)
     return summary
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     """加载配置并执行、恢复、汇总完整评测矩阵。"""
     args = build_parser().parse_args(argv)
+    if args.rerun_failures and args.resume:
+        raise ValueError("--rerun-failures不能与--resume同时使用")
+    if args.rerun_failures and args.scene_seed is not None:
+        raise ValueError("--rerun-failures不能与--scene-seed同时使用")
+    if args.rerun_failures and args.max_rollouts is not None:
+        raise ValueError("--rerun-failures不能与--max-rollouts同时使用")
     checkpoint = find_pretrained_model(args.checkpoint)
     config = load_yaml_config(args.config)
     evaluation = config.get("evaluation", {})
@@ -947,7 +1147,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         evaluation,
         args.execution_horizon,
     )
-    specs = build_specs(evaluation, args.max_rollouts)
+    full_specs = build_specs(evaluation)
+    specs = select_scene_specs(full_specs, args.scene_seed)
+    if args.max_rollouts is not None:
+        if args.max_rollouts <= 0:
+            raise ValueError("max-rollouts必须大于零")
+        specs = specs[:args.max_rollouts]
+    environment = str(evaluation.get("environment", "cube"))
+    appearance_variant = str(evaluation.get("appearance_variant", "original"))
+    if environment == "mug":
+        texture_path = resolve_mug_texture_path(
+            PROJECT_ROOT / "assets" / "mujoco",
+            appearance_variant,
+        )
+        appearance_texture_sha256 = sha256_file(texture_path)
+    else:
+        if appearance_variant != "original":
+            raise ValueError("积木环境不支持杯子appearance_variant")
+        appearance_texture_sha256 = "not_applicable"
     checkpoint_hash = sha256_file(checkpoint / "model.safetensors")
     manifest = build_manifest(
         checkpoint,
@@ -960,16 +1177,42 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.keep_all_videos,
         execution_horizon,
         chunk_size,
+        appearance_variant,
+        appearance_texture_sha256,
     )
-    results = prepare_run(output_dir, manifest, args.resume)
-    completed = {result.rollout_key for result in results}
-    pending = [spec for spec in specs if spec.key not in completed]
+    update_info: dict[str, Any] | None = None
+    if args.rerun_failures:
+        results, previous_failures, legacy_without_manifest = prepare_failure_update(
+            output_dir,
+            manifest,
+            full_specs,
+            checkpoint_hash,
+        )
+        if not previous_failures:
+            print("没有失败rollout，无需更新。", flush=True)
+            return 0
+        repair_legacy_artifact_paths(output_dir, results)
+        pending = [
+            RolloutSpec(result.scene_seed, result.task_id, result.prompt_type, result.policy_seed)
+            for result in previous_failures
+        ]
+        old_results_by_key = {result.rollout_key: asdict(result) for result in previous_failures}
+    else:
+        results = prepare_run(output_dir, manifest, args.resume)
+        completed = {result.rollout_key for result in results}
+        pending = [spec for spec in specs if spec.key not in completed]
+        previous_failures = []
+        legacy_without_manifest = False
+        old_results_by_key = {}
     if pending:
         policy, preprocessor, postprocessor = load_policy_bundle(
             checkpoint,
             args.device,
             execution_horizon,
         )
+        if args.rerun_failures:
+            remove_failure_artifacts(output_dir, previous_failures)
+        rerun_results: list[RolloutResult] = []
         for spec in pending:
             result = run_single_rollout(
                 policy,
@@ -982,17 +1225,43 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.device,
                 checkpoint_hash,
                 execution_horizon,
+                environment,
+                appearance_variant,
             )
-            append_jsonl(output_dir / RESULTS_JSONL, result)
-            results.append(result)
+            if args.rerun_failures:
+                rerun_results.append(result)
+            else:
+                append_jsonl(output_dir / RESULTS_JSONL, result)
+                results.append(result)
             print(json.dumps(asdict(result), ensure_ascii=False), flush=True)
-    results.sort(key=lambda result: [spec.key for spec in specs].index(result.rollout_key))
-    if len(results) != len(specs):
-        raise RuntimeError(f"评测结果不完整: expected={len(specs)}, actual={len(results)}")
+        if args.rerun_failures:
+            replacements = {result.rollout_key: result for result in rerun_results}
+            results = [replacements.get(result.rollout_key, result) for result in results]
+            update_info = {
+                "schema_version": 1,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "mode": "rerun_failures",
+                "legacy_without_manifest": legacy_without_manifest,
+                "checkpoint_path": str(checkpoint.resolve()),
+                "checkpoint_sha256": checkpoint_hash,
+                "source_sha256": manifest["source_sha256"],
+                "config": config,
+                "execution_horizon": execution_horizon,
+                "replayed_rollout_keys": [spec.key for spec in pending],
+                "old_results": [old_results_by_key[spec.key] for spec in pending],
+                "new_results": [asdict(replacements[spec.key]) for spec in pending],
+            }
+    expected_specs = full_specs if args.rerun_failures else specs
+    order = {spec.key: index for index, spec in enumerate(expected_specs)}
+    results.sort(key=lambda result: order[result.rollout_key])
+    if len(results) != len(expected_specs):
+        raise RuntimeError(f"评测结果不完整: expected={len(expected_specs)}, actual={len(results)}")
     validate_completed_results(results)
     retain_videos(output_dir, results, args.keep_all_videos)
     rewrite_jsonl(output_dir / RESULTS_JSONL, results)
-    summary = write_results(output_dir, results, manifest)
+    if update_info is not None:
+        write_json(output_dir / UPDATE_JSON, update_info)
+    summary = write_results(output_dir, results, manifest, update_info)
     return 1 if summary["control_exceptions"] else 0
 
 

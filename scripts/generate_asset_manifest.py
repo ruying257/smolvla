@@ -37,8 +37,15 @@ def generate_manifest(asset_root: Path, source_root: Path, output_path: Path) ->
     records = []
     for target_path in sorted(path for path in asset_root.rglob("*") if path.is_file()):
         relative_name = target_path.relative_to(asset_root).as_posix()
-        # 主场景以ACT的demo_scene.xml为直接来源；其他资源保持同相对路径映射。
-        source_relative_name = "demo_scene.xml" if relative_name == "scene.xml" else relative_name
+        # 两个主场景都以ACT的demo_scene.xml为结构来源；杯子兼容XML则以
+        # model_new.xml为来源。其余资源保持相同的相对路径映射。
+        source_overrides = {
+            "scene.xml": "demo_scene.xml",
+            "mug_scene.xml": "demo_scene.xml",
+            "mug_5/model_smolvla.xml": "mug_5/model_new.xml",
+            "mug_5/visual/image0_green_white.png": "mug_5/visual/image0.png",
+        }
+        source_relative_name = source_overrides.get(relative_name, relative_name)
         source_path = source_root / source_relative_name
         target_hash = _sha256(target_path)
         source_hash = _sha256(source_path) if source_path.is_file() else None

@@ -1,0 +1,23 @@
+# 绿白杯探索实验：2个训练已见场景 × 2个目标任务 × canonical = 4条。
+# 仅改变杯子视觉纹理；不作为颜色因果对照或统计泛化结论。
+evaluation:
+  environment: mug
+  appearance_variant: green_white
+  output_dir: outputs/eval/mug_v1_s8000_h25_seen_green
+  fps: 20
+  max_steps: 360
+  execution_horizon: 25
+  scene_seeds:
+    - 1894
+    - 9864
+    - 8669
+    - 4164
+    - 7359
+    - 6942
+  task_ids:
+    - mug_on_blue
+    - mug_on_yellow
+  prompt_types:
+    - canonical
+  policy_seeds:
+    - 20260

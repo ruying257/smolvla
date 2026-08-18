@@ -82,7 +82,90 @@ pretrained_model/
 
 中断后在同一命令末尾增加`--resume`。分析时只能将seen实验与正式120条结果中的`prompt_type=canonical`子集比较，不能把24条seen结果与包含三种措辞的总体成功率直接相减。该对照用于描述已见布局与未见布局的性能差距，不等同于独立测试集上的泛化结论。
 
-### 3.2 Execution horizon=10诊断实验
+### 3.2 mug_v1杯子模型评测
+
+`smolvla_ur10e_mug_v1_b8_s8000`是使用杯子数据集训练的独立模型，不能套用积木的`eval_seen.yaml`。杯子评测入口会根据配置切换到`MugTabletopEnv`，任务只有：
+
+```text
+20个训练共享scene seed（来自configs/mug_v3_seed_selection.json）
+× 2个任务（mug_on_blue、mug_on_yellow）
+× 1种训练时canonical措辞
+× 1个policy seed（20260）
+= 40条闭环rollout
+```
+
+当前训练输出目录下存在`002000`、`004000`、`006000`、`008000`和`last`。`last`的`training_step.json`记录为8000步，因此本次输出尚未产生10000步checkpoint；目录名中的`s10000`是训练计划名，不代表实际已保存到10000步。
+
+checkpoint参数的选择逻辑如下：
+
+- 传训练输出根目录（例如`outputs\train\smolvla_ur10e_mug_v1_b8_s8000`）时，评测器自动选择`checkpoints\last\pretrained_model`，适合评测最新已保存版本；
+- 传具体checkpoint目录（例如`...\checkpoints\008000\pretrained_model`）时，严格评测该步，不会自动改成`last`；
+- 正式对比不同训练步时，必须为每个步数使用不同输出目录，避免manifest身份和结果互相覆盖。
+
+先执行1条、2步的CUDA冒烟，确认杯子场景、模型加载和视频输出：
+
+```powershell
+conda activate smolvla-eval
+python -m evaluate `
+  --checkpoint outputs\train\smolvla_ur10e_mug_v1_b8_s8000\checkpoints\last\pretrained_model `
+  --config configs\eval\mug_v1.yaml `
+  --output-dir outputs\eval\mug_v1_smoke `
+  --max-rollouts 1 `
+  --max-steps 2 `
+  --keep-all-videos
+```
+
+冒烟通过后运行40条正式seen评测：
+
+```powershell
+conda activate smolvla-eval
+.\evaluate\run.ps1 `
+  --checkpoint outputs\train\smolvla_ur10e_mug_v1_b8_s8000\checkpoints\last\pretrained_model `
+  --config configs\eval\mug_v1.yaml `
+  --output-dir outputs\eval\mug_v1_seen_canonical
+```
+
+首次运行不要加`--resume`；中断后必须使用完全相同的checkpoint、配置和输出目录，再追加`--resume`续跑。
+
+若只想复核一个指定的杯子布局，可增加`--scene-seed`。该参数只收缩场景维度，仍会执行配置中该场景对应的全部任务、措辞和policy seed；因此`mug_v1.yaml`下一个scene会生成blue、yellow两条轨迹。单场景复核必须使用新的输出目录，不能向完整40条正式结果目录续跑：
+
+```powershell
+.\evaluate\run.ps1 `
+  --checkpoint outputs\train\smolvla_ur10e_mug_v1_b8_s8000\checkpoints\008000\pretrained_model `
+  --config configs\eval\mug_v1.yaml `
+  --scene-seed 8669 `
+  --execution-horizon 20 `
+  --output-dir outputs\eval\mug_v1_step8000_scene8669_h20
+```
+
+### 3.3 覆盖更新已有失败rollout
+
+当成功判据修订后需要复核旧失败项时，使用`--rerun-failures`。它读取已有`rollouts.jsonl`，仅重跑全部`success=false`的实验键，保留原成功行，并覆盖失败项的视频、动作轨迹、CSV、汇总与报告。该模式不能与`--resume`、`--scene-seed`或`--max-rollouts`组合；首次更新也不加`--resume`：
+
+```powershell
+conda activate smolvla-eval
+.\evaluate\run.ps1 `
+  --checkpoint outputs\train\smolvla_ur10e_mug_v1_b8_s8000\checkpoints\008000\pretrained_model `
+  --config configs\eval\mug_v1.yaml `
+  --output-dir outputs\eval\mug_v1_s8000_h20_seen_canonical `
+  --execution-horizon 20 `
+  --rerun-failures
+```
+
+命令要求旧结果实验键和checkpoint哈希与当前输入一致；若旧目录有manifest，还会校验checkpoint、配置、环境和execution horizon。旧目录缺少manifest时可显式更新，但会在`rollout_update.json`和`report.md`中标记。该汇总混合了旧成功轨迹与新重跑失败轨迹，适合数据更新与诊断，不应替代全量同版本重跑的正式结果。
+
+若要固定比较8000步模型，改用：
+
+```powershell
+.\evaluate\run.ps1 `
+  --checkpoint outputs\train\smolvla_ur10e_mug_v1_b8_s8000\checkpoints\008000\pretrained_model `
+  --config configs\eval_mug_v1.yaml `
+  --output-dir outputs\eval\mug_v1_step8000_canonical
+```
+
+杯子任务仍使用400步（20秒）超时和严格成功条件：杯子中心进入目标区内缩1厘米边界、保持直立稳定0.5秒并释放夹爪。结果目录中的`rollouts.csv`、`summary.json`、`report.md`、`action_traces/`和视频分别用于统计、失败分类、动作裁剪和人工复核；它们只代表本机MuJoCo杯子场景，不外推为真实机器人成功率。
+
+### 3.3 Execution horizon=10诊断实验
 
 SmolVLA checkpoint保持`chunk_size=50`。增加`--execution-horizon 10`后，每次仍生成50步动作，但只执行前10步，随后使用最新图像和状态重新生成chunk。该模式属于Receding Horizon，不对重叠chunk求平均，也不是RTC。
 
