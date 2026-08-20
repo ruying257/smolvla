@@ -23,6 +23,7 @@ from evaluate.common import (
     load_yaml_config,
 )
 from evaluate.rollout import (
+    GripperHysteresisFilter,
     RolloutResult,
     RolloutSpec,
     append_jsonl,
@@ -35,6 +36,7 @@ from evaluate.rollout import (
     prepare_run,
     retain_videos,
     resolve_execution_horizon,
+    resolve_gripper_filter,
     resolve_motion_limiter,
     run_single_rollout,
     select_scene_specs,
@@ -226,6 +228,84 @@ class EvaluationContractTests(unittest.TestCase):
             settings = resolve_motion_limiter({"motion_limiter": {"enabled": True, "limits_path": str(path)}}, 20)
             self.assertTrue(settings["enabled"])
 
+    def test_gripper_filter_config_defaults_disable_and_validation(self) -> None:
+        """夹爪过滤配置应提供稳定默认值、关闭兼容和严格校验。"""
+        self.assertEqual(
+            resolve_gripper_filter({}),
+            {
+                "enabled": True,
+                "close_threshold": 0.8,
+                "open_threshold": 0.05,
+                "close_confirmation_frames": 2,
+                "open_confirmation_frames": 3,
+            },
+        )
+        self.assertEqual(
+            resolve_gripper_filter({"gripper_filter": {"enabled": False}}),
+            {"enabled": False},
+        )
+        invalid_sections = (
+            {"close_threshold": 0.05, "open_threshold": 0.05},
+            {"close_threshold": 1.1},
+            {"open_threshold": -0.1},
+            {"close_confirmation_frames": 0},
+            {"open_confirmation_frames": 1.5},
+        )
+        for section in invalid_sections:
+            with self.subTest(section=section), self.assertRaises(ValueError):
+                resolve_gripper_filter({"gripper_filter": section})
+
+    def test_gripper_filter_hysteresis_and_confirmation(self) -> None:
+        """双阈值应锁存中间值，并按2帧闭合、3帧打开。"""
+        gripper_filter = GripperHysteresisFilter()
+        first_high = gripper_filter.apply(0.8)
+        self.assertEqual(first_high.command, 0.0)
+        self.assertEqual(first_high.confirmation_count, 1)
+        closed = gripper_filter.apply(0.9)
+        self.assertEqual(closed.command, 1.0)
+        self.assertEqual(closed.transition, "close")
+
+        middle = gripper_filter.apply(0.4)
+        self.assertEqual(middle.command, 1.0)
+        self.assertEqual(middle.confirmation_count, 0)
+        self.assertEqual(gripper_filter.apply(0.05).command, 1.0)
+        self.assertEqual(gripper_filter.apply(0.03).command, 1.0)
+        opened = gripper_filter.apply(0.0)
+        self.assertEqual(opened.command, 0.0)
+        self.assertEqual(opened.transition, "open")
+
+        self.assertEqual(gripper_filter.apply(0.8).command, 0.0)
+        self.assertEqual(gripper_filter.apply(1.0).command, 1.0)
+
+    def test_gripper_filter_resets_confirmation_when_sequence_breaks(self) -> None:
+        """候选序列被中间值打断后必须重新累计确认帧。"""
+        gripper_filter = GripperHysteresisFilter()
+        gripper_filter.apply(1.0)
+        gripper_filter.apply(1.0)
+        self.assertEqual(gripper_filter.apply(0.04).confirmation_count, 1)
+        self.assertEqual(gripper_filter.apply(0.2).confirmation_count, 0)
+        self.assertEqual(gripper_filter.apply(0.04).command, 1.0)
+        self.assertEqual(gripper_filter.apply(0.03).command, 1.0)
+        self.assertEqual(gripper_filter.apply(0.02).command, 0.0)
+
+    def test_gripper_filter_blocks_scene_2277_spurious_release(self) -> None:
+        """本例277至314步仅一个低值帧，不得解除闭爪锁存。"""
+        gripper_filter = GripperHysteresisFilter()
+        gripper_filter.apply(0.99)
+        gripper_filter.apply(0.99)
+        failure_commands = [
+            0.082, 0.746, 0.235, 0.763, 0.087, 0.223, 0.100, 0.119,
+            0.099, 0.095, 0.098, 0.095, 0.096, 0.105, 0.101, 0.108,
+            0.114, 0.120, 0.120, 0.112, 0.100, 0.099, 0.094, 0.092,
+            0.071, 0.064, 0.132, 0.274, 0.090, 0.063, 0.054, 0.043,
+            0.054, 0.062, 0.305, 0.145, 0.189, 0.104,
+        ]
+        filtered = [gripper_filter.apply(value).command for value in failure_commands]
+        self.assertEqual(filtered, [1.0] * len(failure_commands))
+        self.assertEqual(gripper_filter.apply(0.04).command, 1.0)
+        self.assertEqual(gripper_filter.apply(0.03).command, 1.0)
+        self.assertEqual(gripper_filter.apply(0.02).command, 0.0)
+
     def test_expert_calibration_keeps_episode_boundaries_separate(self) -> None:
         """专家动作标定不得把两个episode首尾拼接为一个大跳变。"""
         trajectories = [
@@ -287,6 +367,12 @@ class EvaluationContractTests(unittest.TestCase):
         current = update_manifest_identity({"motion_limiter": {"enabled": False}})
         self.assertEqual(legacy, current)
 
+    def test_failure_update_treats_missing_gripper_filter_as_disabled(self) -> None:
+        """旧manifest缺少夹爪过滤字段时应解释为连续值透传。"""
+        legacy = update_manifest_identity({"gripper_filter": None})
+        current = update_manifest_identity({"gripper_filter": {"enabled": False}})
+        self.assertEqual(legacy, current)
+
 
 class FakePolicy:
     """返回当前关节状态的无模型测试策略。"""
@@ -300,6 +386,20 @@ class FakePolicy:
     def select_action(self, observation: dict[str, object]) -> object:
         """保持当前关节目标并打开夹爪。"""
         return observation["observation.state"]
+
+
+class FixedGripperPolicy(FakePolicy):
+    """保持机械臂状态并输出固定连续夹爪值。"""
+
+    def __init__(self, gripper: float) -> None:
+        super().__init__()
+        self.gripper = float(gripper)
+
+    def select_action(self, observation: dict[str, object]) -> object:
+        """返回带固定夹爪维度的动作副本。"""
+        action = observation["observation.state"].clone()
+        action[..., 6] = self.gripper
+        return action
 
 
 class LocalRolloutTests(unittest.TestCase):
@@ -331,6 +431,13 @@ class LocalRolloutTests(unittest.TestCase):
             first_trace = json.loads(trace_lines[0])
             self.assertEqual(first_trace["model_output"], first_trace["physical_action"])
             self.assertEqual(first_trace["physical_action"], first_trace["executed_action"])
+            self.assertTrue(first_trace["gripper_filter_enabled"])
+            self.assertEqual(first_trace["gripper_raw_command"], 0.0)
+            self.assertEqual(first_trace["gripper_filtered_command"], 0.0)
+            self.assertEqual(first_trace["gripper_filter_state"], "open")
+            self.assertEqual(first_trace["gripper_confirmation_count"], 0)
+            self.assertFalse(first_trace["gripper_state_transitioned"])
+            self.assertEqual(first_trace["gripper_transition"], "none")
             self.assertTrue(first_trace["chunk_start"])
             self.assertIn("actual_qpos_after", first_trace)
             self.assertIn("actual_qvel_after", first_trace)
@@ -344,6 +451,29 @@ class LocalRolloutTests(unittest.TestCase):
             self.assertTrue((output / "motion_metrics_by_rollout.csv").is_file())
             self.assertTrue((output / "motion_metrics_summary.json").is_file())
             self.assertTrue((output / "motion_metrics_report.md").is_file())
+
+    def test_disabled_gripper_filter_preserves_continuous_command(self) -> None:
+        """关闭过滤器时最终执行值必须与原连续夹爪值一致。"""
+        with workspace_temp_dir() as output:
+            result = run_single_rollout(
+                FixedGripperPolicy(0.37),
+                lambda value: value,
+                lambda value: value,
+                spec=RolloutSpec(123, "red_on_blue", "canonical", 20260),
+                output_dir=output,
+                fps=20,
+                max_steps=1,
+                device="cpu",
+                checkpoint_sha256="abc",
+                execution_horizon=1,
+                gripper_filter_settings={"enabled": False},
+            )
+            trace = json.loads(Path(result.action_trace_path).read_text(encoding="utf-8"))
+            self.assertFalse(trace["gripper_filter_enabled"])
+            self.assertAlmostEqual(trace["physical_action"][6], 0.37, places=6)
+            self.assertAlmostEqual(trace["range_safe_action"][6], 0.37, places=6)
+            self.assertAlmostEqual(trace["executed_action"][6], 0.37, places=6)
+            self.assertEqual(trace["gripper_filter_state"], "passthrough")
 
     def test_joint_motion_limiter_limits_second_order_reference_and_preserves_gripper(self) -> None:
         """限制器必须同时限制速度、加速度，并原样透传夹爪指令。"""

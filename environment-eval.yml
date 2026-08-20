@@ -1,5 +1,11 @@
-# 一键创建 smolvla-eval 评测环境（conda + pip，pip 走清华镜像）
-# 用法: conda env create -f environment-eval.yml
+# 创建 smolvla-eval 评测环境（conda + pip，pip 走清华镜像）。
+# 注意：PyPI / 清华镜像在 Windows 下只有 torch 的 CPU 版；
+# CUDA 版必须先从官方源安装，因此本文件不包含 torch/torchvision。
+# 推荐直接用 scripts/setup_eval_env.ps1 一键完成；手动步骤：
+#   1) conda env create -f environment-eval.yml
+#   2) conda activate smolvla-eval
+#   3) python -m pip install torch==2.7.0 torchvision==0.22.0 --index-url https://download.pytorch.org/whl/cu126
+#   4) python -m pip install -r requirements-eval.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 name: smolvla-eval
 channels:
   - conda-forge

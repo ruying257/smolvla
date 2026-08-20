@@ -1,12 +1,13 @@
 # SmolVLA local closed-loop evaluation environment
 # Target: Windows 11 / NVIDIA RTX 4060 (Ada) / conda Python 3.10
-# Aligned with constraints.txt. PyPI torch 2.7.0 wheels are the cu126 CUDA build,
-# which is compatible with RTX 4060; no separate PyTorch index is required.
+#
+# IMPORTANT: torch / torchvision are intentionally NOT listed here.
+# On Windows, PyPI and its mirrors (tsinghua/aliyun/tencent) only ship the CPU build
+# of torch. The CUDA 12.6 build must be installed FIRST from the official index:
+#   pip install torch==2.7.0 torchvision==0.22.0 --index-url https://download.pytorch.org/whl/cu126
+# (mirror: https://mirrors.aliyun.com/pytorch-wheels/cu126/ )
+# Then install this file. Version pins are aligned with constraints.txt.
 # Evaluation is headless: no glfw / GUI deps needed (mujoco.Renderer offscreen).
-
-# --- Deep learning core (CUDA 12.6 build, from PyPI / mirrors) ---
-torch==2.7.0
-torchvision==0.22.0
 
 # --- LeRobot 0.4.4 + SmolVLA policy ---
 lerobot[smolvla]==0.4.4

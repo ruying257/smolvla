@@ -132,6 +132,16 @@ nvidia-smi                    # 确认 RTX 4060 与驱动版本
 python -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.cuda.get_device_name(0))"
 ```
 
+**必须确认输出为 `2.7.0+cu126` 且 `True`**。PyPI/清华镜像在 Windows 下只有 torch
+的 CPU 版（版本号无 `+cu126` 后缀、`cuda_available` 为 False）；CUDA 版必须从官方源
+单独安装。若当前是 CPU 版，先修复环境（`environment-eval.yml` 与
+`scripts/setup_eval_env.ps1` 已更新，重新执行脚本或在现有环境中执行）：
+
+```powershell
+python -m pip install torch==2.7.0 torchvision==0.22.0 --index-url https://download.pytorch.org/whl/cu126
+python -m pip install -r requirements-eval.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+```
+
 checkpoint 必须完整（缺一不可），从训练服务器/笔记本拷贝：
 
 ```text

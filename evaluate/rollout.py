@@ -63,6 +63,13 @@ ACTION_DIMENSIONS = (
     "wrist_3",
     "gripper",
 )
+DEFAULT_GRIPPER_FILTER = {
+    "enabled": True,
+    "close_threshold": 0.8,
+    "open_threshold": 0.05,
+    "close_confirmation_frames": 2,
+    "open_confirmation_frames": 3,
+}
 
 
 @dataclass(frozen=True)
@@ -104,6 +111,103 @@ class RolloutResult:
     video_retained: bool
     error: str
     completed_at: str
+
+
+@dataclass(frozen=True)
+class GripperFilterResult:
+    """单帧夹爪迟滞过滤结果。"""
+
+    command: float
+    state: str
+    confirmation_count: int
+    transitioned: bool
+    transition: str
+
+
+class GripperHysteresisFilter:
+    """使用双阈值和连续帧确认过滤夹爪动作。
+
+    初始状态为开爪。开爪状态下连续高值触发闭爪，闭爪状态下连续低值
+    触发开爪；两个阈值之间的动作保持当前状态并清空确认计数。
+    """
+
+    def __init__(
+        self,
+        close_threshold: float = 0.8,
+        open_threshold: float = 0.05,
+        close_confirmation_frames: int = 2,
+        open_confirmation_frames: int = 3,
+    ) -> None:
+        """初始化夹爪迟滞过滤器。
+
+        Args:
+            close_threshold: 开爪状态进入闭爪候选的最小动作值。
+            open_threshold: 闭爪状态进入开爪候选的最大动作值。
+            close_confirmation_frames: 闭爪所需连续确认帧数。
+            open_confirmation_frames: 开爪所需连续确认帧数。
+
+        Raises:
+            ValueError: 阈值或确认帧数不合法时抛出。
+        """
+        _validate_gripper_filter_values(
+            close_threshold,
+            open_threshold,
+            close_confirmation_frames,
+            open_confirmation_frames,
+        )
+        self.close_threshold = float(close_threshold)
+        self.open_threshold = float(open_threshold)
+        self.close_confirmation_frames = int(close_confirmation_frames)
+        self.open_confirmation_frames = int(open_confirmation_frames)
+        self.reset()
+
+    def reset(self) -> None:
+        """恢复到每条 rollout 的初始开爪状态。"""
+        self.state = "open"
+        self._confirmation_count = 0
+
+    def apply(self, raw_command: float) -> GripperFilterResult:
+        """过滤一帧已裁剪到 ``[0, 1]`` 的夹爪动作。
+
+        Args:
+            raw_command: 动作后处理及范围裁剪后的夹爪值。
+
+        Returns:
+            二值执行命令、锁存状态及本帧确认信息。
+
+        Raises:
+            ValueError: 输入不是有限的 ``[0, 1]`` 数值时抛出。
+        """
+        value = float(raw_command)
+        if not np.isfinite(value) or not 0.0 <= value <= 1.0:
+            raise ValueError(f"夹爪过滤输入必须位于[0,1]，实际为{raw_command}")
+
+        transitioned = False
+        transition = "none"
+        if self.state == "open":
+            self._confirmation_count = self._confirmation_count + 1 if value >= self.close_threshold else 0
+            reported_count = self._confirmation_count
+            if self._confirmation_count >= self.close_confirmation_frames:
+                self.state = "closed"
+                self._confirmation_count = 0
+                transitioned = True
+                transition = "close"
+        else:
+            self._confirmation_count = self._confirmation_count + 1 if value <= self.open_threshold else 0
+            reported_count = self._confirmation_count
+            if self._confirmation_count >= self.open_confirmation_frames:
+                self.state = "open"
+                self._confirmation_count = 0
+                transitioned = True
+                transition = "open"
+
+        return GripperFilterResult(
+            command=1.0 if self.state == "closed" else 0.0,
+            state=self.state,
+            confirmation_count=reported_count,
+            transitioned=transitioned,
+            transition=transition,
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -269,6 +373,78 @@ def resolve_motion_limiter(evaluation: dict[str, Any], fps: int) -> dict[str, An
         "limits_sha256": sha256_file(path),
         "velocity_limits_rad_s": limits.velocity_limits_rad_s.astype(float).tolist(),
         "acceleration_limits_rad_s2": limits.acceleration_limits_rad_s2.astype(float).tolist(),
+    }
+
+
+def _validate_gripper_filter_values(
+    close_threshold: float,
+    open_threshold: float,
+    close_confirmation_frames: int,
+    open_confirmation_frames: int,
+) -> None:
+    """校验夹爪过滤器的数值配置。"""
+    thresholds = np.asarray([open_threshold, close_threshold], dtype=np.float64)
+    if not np.isfinite(thresholds).all() or not 0.0 <= open_threshold < close_threshold <= 1.0:
+        raise ValueError(
+            "gripper_filter必须满足0 <= open_threshold < close_threshold <= 1"
+        )
+    for name, value in (
+        ("close_confirmation_frames", close_confirmation_frames),
+        ("open_confirmation_frames", open_confirmation_frames),
+    ):
+        if isinstance(value, bool) or not isinstance(value, (int, np.integer)) or int(value) <= 0:
+            raise ValueError(f"gripper_filter.{name}必须是正整数")
+
+
+def resolve_gripper_filter(evaluation: dict[str, Any]) -> dict[str, Any]:
+    """解析并规范化评测配置中的夹爪迟滞过滤器。
+
+    Args:
+        evaluation: YAML中的 ``evaluation`` 配置段。
+
+    Returns:
+        可直接构造过滤器并写入manifest的规范化配置。
+
+    Raises:
+        ValueError: 配置类型、阈值或确认帧数不合法时抛出。
+    """
+    section = evaluation.get("gripper_filter", {})
+    if section is None:
+        section = {}
+    if not isinstance(section, dict):
+        raise ValueError("gripper_filter配置必须是映射")
+    enabled = section.get("enabled", DEFAULT_GRIPPER_FILTER["enabled"])
+    if not isinstance(enabled, bool):
+        raise ValueError("gripper_filter.enabled必须是布尔值")
+    if not enabled:
+        return {"enabled": False}
+
+    close_threshold = section.get("close_threshold", DEFAULT_GRIPPER_FILTER["close_threshold"])
+    open_threshold = section.get("open_threshold", DEFAULT_GRIPPER_FILTER["open_threshold"])
+    close_frames = section.get(
+        "close_confirmation_frames",
+        DEFAULT_GRIPPER_FILTER["close_confirmation_frames"],
+    )
+    open_frames = section.get(
+        "open_confirmation_frames",
+        DEFAULT_GRIPPER_FILTER["open_confirmation_frames"],
+    )
+    if isinstance(close_threshold, bool) or not isinstance(close_threshold, (int, float)):
+        raise ValueError("gripper_filter.close_threshold必须是数值")
+    if isinstance(open_threshold, bool) or not isinstance(open_threshold, (int, float)):
+        raise ValueError("gripper_filter.open_threshold必须是数值")
+    _validate_gripper_filter_values(
+        float(close_threshold),
+        float(open_threshold),
+        close_frames,
+        open_frames,
+    )
+    return {
+        "enabled": True,
+        "close_threshold": float(close_threshold),
+        "open_threshold": float(open_threshold),
+        "close_confirmation_frames": int(close_frames),
+        "open_confirmation_frames": int(open_frames),
     }
 
 
@@ -450,6 +626,7 @@ def run_single_rollout(
     appearance_variant: str = "original",
     motion_limiter_settings: dict[str, Any] | None = None,
     chunk_blend: int = 0,
+    gripper_filter_settings: dict[str, Any] | None = None,
 ) -> RolloutResult:
     """执行一条固定场景和模型随机种子的闭环rollout。
 
@@ -467,6 +644,8 @@ def run_single_rollout(
         environment: ``cube``或``mug``仿真环境。
         appearance_variant: 杯子环境使用的视觉外观变体。
         motion_limiter_settings: 已解析的限制器配置；未启用时为``None``或``enabled=false``。
+        chunk_blend: 动作chunk边界插值帧数。
+        gripper_filter_settings: 已解析的夹爪迟滞过滤配置。
 
     Returns:
         单条闭环评测结果。
@@ -515,6 +694,22 @@ def run_single_rollout(
             physics_steps = max(1, round((1.0 / fps) / float(env.model.opt.timestep)))
             action_lower = np.concatenate([env.model.actuator_ctrlrange[:6, 0], [0.0]])
             action_upper = np.concatenate([env.model.actuator_ctrlrange[:6, 1], [1.0]])
+            filter_settings = (
+                gripper_filter_settings
+                if gripper_filter_settings is not None
+                else resolve_gripper_filter({})
+            )
+            gripper_filter_enabled = bool(filter_settings.get("enabled", False))
+            gripper_filter = (
+                GripperHysteresisFilter(
+                    close_threshold=float(filter_settings["close_threshold"]),
+                    open_threshold=float(filter_settings["open_threshold"]),
+                    close_confirmation_frames=int(filter_settings["close_confirmation_frames"]),
+                    open_confirmation_frames=int(filter_settings["open_confirmation_frames"]),
+                )
+                if gripper_filter_enabled
+                else None
+            )
             limiter: JointMotionLimiter | None = None
             limiter_enabled = bool(motion_limiter_settings and motion_limiter_settings.get("enabled", False))
             if limiter_enabled:
@@ -544,13 +739,26 @@ def run_single_rollout(
                 physical_action_vector = action_to_vector(physical_action)
                 safe_action = convert_policy_action(physical_action_vector, env.model.actuator_ctrlrange[:6])
                 clipped_steps += int(safe_action.clipped)
+                filtered_action = safe_action.command.copy()
+                raw_gripper_command = float(filtered_action[6])
+                if gripper_filter is None:
+                    gripper_filter_result = GripperFilterResult(
+                        command=raw_gripper_command,
+                        state="passthrough",
+                        confirmation_count=0,
+                        transitioned=False,
+                        transition="none",
+                    )
+                else:
+                    gripper_filter_result = gripper_filter.apply(raw_gripper_command)
+                    filtered_action[6] = gripper_filter_result.command
                 if limiter is None:
-                    executed_action = safe_action.command
+                    executed_action = filtered_action
                     motion_limited_mask = np.zeros(7, dtype=np.bool_)
                     motion_limit_amount = np.zeros(7, dtype=np.float32)
                     reference_velocity = np.zeros(6, dtype=np.float64)
                 else:
-                    executed_action, motion_limited_mask, motion_limit_amount = limiter.limit(safe_action.command)
+                    executed_action, motion_limited_mask, motion_limit_amount = limiter.limit(filtered_action)
                     reference_velocity = limiter.reference_velocity
                 env.apply_joint_action(executed_action, physics_steps=physics_steps)
                 actual_state_after = env.get_state()
@@ -565,6 +773,13 @@ def run_single_rollout(
                         "physical_action": physical_action_vector.tolist(),
                         "range_safe_action": safe_action.command.astype(np.float64).tolist(),
                         "executed_action": executed_action.astype(np.float64).tolist(),
+                        "gripper_filter_enabled": gripper_filter_enabled,
+                        "gripper_raw_command": raw_gripper_command,
+                        "gripper_filtered_command": float(gripper_filter_result.command),
+                        "gripper_filter_state": gripper_filter_result.state,
+                        "gripper_confirmation_count": gripper_filter_result.confirmation_count,
+                        "gripper_state_transitioned": gripper_filter_result.transitioned,
+                        "gripper_transition": gripper_filter_result.transition,
                         "action_lower": action_lower.astype(np.float64).tolist(),
                         "action_upper": action_upper.astype(np.float64).tolist(),
                         "clipped_mask": safe_action.clipped_mask.tolist(),
@@ -762,10 +977,11 @@ def build_manifest(
     appearance_texture_sha256: str,
     motion_limiter: dict[str, Any],
     chunk_blend: int = 0,
+    gripper_filter: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """构造用于恢复校验的完整运行清单。"""
     return {
-        "schema_version": 4,
+        "schema_version": 5,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "checkpoint_path": str(checkpoint.resolve()),
         "checkpoint_sha256": checkpoint_sha256,
@@ -781,6 +997,7 @@ def build_manifest(
         "appearance_texture_sha256": appearance_texture_sha256,
         "motion_limiter": motion_limiter,
         "chunk_blend": chunk_blend,
+        "gripper_filter": gripper_filter if gripper_filter is not None else resolve_gripper_filter({}),
         "keep_all_videos": keep_all_videos,
         "config": config,
         "rollout_count": len(specs),
@@ -810,6 +1027,7 @@ def manifest_identity(manifest: dict[str, Any]) -> dict[str, Any]:
         "appearance_texture_sha256",
         "motion_limiter",
         "chunk_blend",
+        "gripper_filter",
         "keep_all_videos",
     )
     identity = {key: manifest.get(key) for key in keys}
@@ -817,6 +1035,9 @@ def manifest_identity(manifest: dict[str, Any]) -> dict[str, Any]:
     # 关闭(0)完全等价，避免为默认值升级错误拒绝续跑。
     if identity["chunk_blend"] is None:
         identity["chunk_blend"] = 0
+    # schema_version=4及更早版本未记录夹爪过滤器，按旧版连续值透传处理。
+    if identity["gripper_filter"] is None:
+        identity["gripper_filter"] = {"enabled": False}
     return identity
 
 
@@ -872,6 +1093,7 @@ def update_manifest_identity(manifest: dict[str, Any]) -> dict[str, Any]:
         "appearance_texture_sha256",
         "motion_limiter",
         "chunk_blend",
+        "gripper_filter",
         "keep_all_videos",
         "config",
     )
@@ -883,6 +1105,9 @@ def update_manifest_identity(manifest: dict[str, Any]) -> dict[str, Any]:
     # schema_version=4及更早版本尚未记录chunk_blend，缺失等价于默认关闭(0)。
     if identity["chunk_blend"] is None:
         identity["chunk_blend"] = 0
+    # 旧结果缺少夹爪过滤配置时，明确解释为连续值透传。
+    if identity["gripper_filter"] is None:
+        identity["gripper_filter"] = {"enabled": False}
     return identity
 
 
@@ -1365,6 +1590,16 @@ def write_report(
 ) -> None:
     """生成便于人工阅读和归档的Markdown评测报告。"""
     ci = summary["success_rate_ci95_scene_bootstrap"]
+    gripper_filter = manifest.get("gripper_filter", {"enabled": False})
+    if gripper_filter.get("enabled", False):
+        gripper_filter_description = (
+            f"启用（闭爪阈值={gripper_filter['close_threshold']}，"
+            f"开爪阈值={gripper_filter['open_threshold']}，"
+            f"闭/开确认={gripper_filter['close_confirmation_frames']}/"
+            f"{gripper_filter['open_confirmation_frames']}帧）"
+        )
+    else:
+        gripper_filter_description = "关闭（连续值透传）"
     lines = [
         "# SmolVLA 闭环评测报告",
         "",
@@ -1378,6 +1613,7 @@ def write_report(
         f"- 语言泛化差距：{summary['language_generalization_gap']:.2%}",
         f"- 控制异常：{summary['control_exceptions']}",
         f"- Execution horizon：{manifest.get('execution_horizon', 'unknown')}步",
+        f"- 夹爪迟滞过滤：{gripper_filter_description}",
         f"- 杯子外观：`{manifest.get('appearance_variant', 'original')}`",
         f"- 外观纹理SHA-256：`{manifest.get('appearance_texture_sha256', 'not_applicable')}`",
         "",
@@ -1471,6 +1707,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if fps <= 0 or max_steps <= 0:
         raise ValueError("fps和max_steps必须大于零")
     motion_limiter = resolve_motion_limiter(evaluation, fps)
+    gripper_filter = resolve_gripper_filter(evaluation)
     execution_horizon, chunk_size = resolve_execution_horizon(
         checkpoint,
         evaluation,
@@ -1513,6 +1750,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         appearance_texture_sha256,
         motion_limiter,
         chunk_blend,
+        gripper_filter,
     )
     update_info: dict[str, Any] | None = None
     if args.rerun_failures:
@@ -1565,6 +1803,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 appearance_variant,
                 motion_limiter,
                 chunk_blend,
+                gripper_filter,
             )
             if args.rerun_failures:
                 rerun_results.append(result)
@@ -1585,6 +1824,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "source_sha256": manifest["source_sha256"],
                 "config": config,
                 "execution_horizon": execution_horizon,
+                "gripper_filter": gripper_filter,
                 "replayed_rollout_keys": [spec.key for spec in pending],
                 "old_results": [old_results_by_key[spec.key] for spec in pending],
                 "new_results": [asdict(replacements[spec.key]) for spec in pending],

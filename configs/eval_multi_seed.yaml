@@ -11,6 +11,13 @@ evaluation:
   max_steps: 360
   # 与存档 mug_v1_s8000_h25_unseen_canonical 一致：每次预测50步、只执行25步后重规划。
   execution_horizon: 25
+  # 夹爪迟滞过滤：运输阶段锁存闭爪，只接受持续、接近零的释放意图。
+  gripper_filter:
+    enabled: true
+    close_threshold: 0.8
+    open_threshold: 0.05
+    close_confirmation_frames: 2
+    open_confirmation_frames: 3
   # seed使用真实MugTabletopEnv.reset()在[0,10000)候选池中筛选；排除20个训练seed，
   # 再按4×5空间网格每格选择一个合法、靠近格中心且相互至少相隔4cm的布局。
   scene_seeds:
