@@ -4,9 +4,10 @@
 # policy_seed固定20260，仅用于复现Flow Matching采样；每条轨迹最多360步（18秒）。
 evaluation:
   environment: mug
-  output_dir: outputs/eval/mug_v1_unseen_canonical
+  output_dir: outputs/eval/mug_v1_s8000_h25_unseen_canonical
   fps: 20
   max_steps: 360
+  execution_horizon: 25
   scene_seeds:
     - 9201
     - 3132

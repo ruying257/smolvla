@@ -190,6 +190,43 @@ python scripts\calibrate_motion_limits.py `
 
 每条动作日志会记录范围裁剪后动作、限制器最终执行动作、参考速度，以及物理推进后的实际关节位置/速度和末端位置。结果目录新增`motion_metrics_by_rollout.csv`、`motion_metrics_summary.json`与`motion_metrics_report.md`；正式比较以逐轨迹中位数和scene-bootstrap区间为准，不应只比较单条视频。
 
+### 3.2.2 chunk 衔接平滑（--chunk-blend）
+
+SmolVLA 按 `chunk_size`（50）预测动作 chunk 并逐帧执行，队列耗尽时重新预测。重预测时新 chunk 的起点与旧 chunk 尾部在输出空间不连续，会造成周期性方向突变/抖动（`outputs/eval/chunk_boundary_analysis/report.md` 分析：边界模型输出跳变是 chunk 内部的 1.3–2.1 倍，且失败轨迹边界跳变显著更大）。
+
+`--chunk-blend K` 在**模型输出层**对重预测边界做衔接平滑：每次重预测时用旧 chunk 的尾帧作锚点，对新 chunk 前 K 帧做带角度回卷的线性插值，使衔接连续。两个保护：
+
+- **角度回卷**：前 6 个关节角是循环量，插值前把角度差回卷到 `[-pi, pi)`，避免跨 ±π 时多转一整圈；
+- **夹爪保护**：第 7 维夹爪是离散语义（开/合），不参与插值，直接透传新 chunk 值，避免产生"半开半合"的无意义中间夹持力。
+
+`K=0`（默认）时完全退化为直接透传，行为等同未启用。K 建议取 2–4（数据中边界跳变集中在边界首帧，K 过大反而拖慢动作并偏离模型意图）。该参数属于 manifest 身份，改变时必须使用新输出目录：
+
+```powershell
+.\evaluate\run.ps1 `
+  --checkpoint outputs\train\smolvla_ur10e_mug_v1_b8_s8000\checkpoints\008000\pretrained_model `
+  --config configs\eval\mug_v1.yaml `
+  --output-dir outputs\eval\mug_v1_s8000_h25_seen_canonical_blend4 `
+  --execution-horizon 25 `
+  --chunk-blend 4
+```
+
+实现位于 `evaluate/rollout.py` 的 `ChunkBlendPolicy`，通过标准 `predict_action_chunk` 接口预测整段 chunk 并自行管理动作队列，因此对其他 chunking 策略（ACT 等）同样适用，且不依赖 SmolVLA 私有队列结构。每条动作日志会额外记录 `chunk_blend` 字段，便于用 `scripts/analyze_chunk_boundary_jitter.py` 对比边界方向翻转率是否回落。
+
+#### 对照实验结果（008000 checkpoint，mug seen canonical，h25，40 条/组）
+
+产物：`outputs/eval/chunk_blend/`（K0/K2/K4 子目录 + `analysis/` + `summary_comparison.csv` + `report.md`）。
+
+| K | 成功率 (n=40) | Bootstrap 95% CI | 完成步数中位数 | exec_jump_ratio | model_jump_ratio | dir_cos_ratio | 边界方向翻转率 |
+| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 0 | 77.5% | [0.625, 0.900] | 270 | 1.39 | 1.76 | 0.70 | 0.111 |
+| 2 | 80.0% | [0.650, 0.925] | 270 | 0.92 | 0.99 | 0.97 | 0.000 |
+| 4 | 85.0% | [0.725, 0.950] | 267 | 0.54 | 0.58 | 1.05 | 0.000 |
+
+**结论**：
+- 边界抖动被显著消除：`exec_jump_ratio`/`model_jump_ratio` 从 >1（边界跳变大于内部）随 K 增大回落到 <1；`dir_cos_ratio` 从 0.70 回升到 ≈1（边界方向连续性恢复）；**边界方向翻转率从 0.11 降为 0**。
+- 成功率不降反升（77.5% → 85%），但 Bootstrap CI 与 K0 有重叠，提升未达统计显著；完成步数中位数基本不变（270→267），说明 K=4 未拖慢动作。
+- 综合建议：`--chunk-blend 4` 在 h25 下能稳定消除边界抖动且无成功率/步数代价；若更保守可先用 K=2。
+
 ### 3.3 Execution horizon=10诊断实验
 
 SmolVLA checkpoint保持`chunk_size=50`。增加`--execution-horizon 10`后，每次仍生成50步动作，但只执行前10步，随后使用最新图像和状态重新生成chunk。该模式属于Receding Horizon，不对重叠chunk求平均，也不是RTC。

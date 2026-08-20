@@ -130,6 +130,13 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         help="每个动作chunk实际执行的步数；例如10表示预测50步但只执行前10步后重规划",
     )
+    parser.add_argument(
+        "--chunk-blend",
+        type=int,
+        default=0,
+        help="模型输出层chunk衔接平滑帧数K（默认0关闭）。重预测时用旧chunk尾帧作锚点，"
+        "对新chunk前K帧做带角度回卷的线性插值；夹爪维度透传不插值。用于消除重预测边界的方向突变/抖动。",
+    )
     parser.add_argument("--resume", action="store_true", help="校验manifest后续跑未完成或异常轨迹")
     parser.add_argument(
         "--rerun-failures",
@@ -301,6 +308,117 @@ def load_policy_bundle(
     return policy, preprocessor, postprocessor
 
 
+def _wrap_angle(angle: NDArray[np.floating]) -> NDArray[np.floating]:
+    """把角度差回卷到 [-pi, pi)，避免线性插值跨 ±pi 绕远路。
+
+    关节角是循环量：对跨越 π 边界的两个角度直接线性插值会走一整圈的
+    远路（例如 +3.0 与 -3.0 直插得到 0，实际只差 0.28 rad）。回卷后走
+    最短弧。对差值本来就落在 [-pi, pi) 的情况是 no-op。
+    """
+    return (angle + np.pi) % (2.0 * np.pi) - np.pi
+
+
+def _tensor_to_numpy_action_chunk(chunk: Any) -> NDArray[np.float64]:
+    """把策略预测的动作 chunk 张量转换为 ``(steps, 7)`` float64 数组。"""
+    if hasattr(chunk, "detach"):
+        chunk = chunk.detach().cpu()
+    array = np.asarray(chunk)
+    if array.ndim == 3:  # (batch, steps, dim) -> (steps, dim)
+        array = array[0]
+    return np.asarray(array, dtype=np.float64)
+
+
+class ChunkBlendPolicy:
+    """在策略重预测时对动作 chunk 前 K 帧做衔接平滑（模型输出层）。
+
+    动机：SmolVLA 按 ``n_action_steps`` 预测一段动作 chunk 并逐帧执行，
+    队列耗尽时重新预测。新 chunk 的起点与旧 chunk 尾部在输出空间不连续，
+    造成周期性方向突变/抖动（前序分析：边界模型输出跳变是 chunk 内部的
+    1.3–2.1 倍）。本包装器在每次重预测时，用旧 chunk 的尾帧作为锚点，
+    对新 chunk 前 K 帧做带角度回卷的线性插值，使衔接连续。
+
+    两个保护：
+    - **角度回卷**：前 6 个关节角是循环量，插值前把角度差回卷到 [-pi, pi)，
+      避免跨 π 时多转一整圈。
+    - **夹爪保护**：第 7 维夹爪是离散语义（开/合），不参与插值，直接透传
+      新 chunk 的值，避免产生"半开半合"的无意义中间夹持力。
+
+    ``blend_frames=0`` 时退化为直接透传底层策略，行为完全等同未包装。
+
+    通过标准 ``predict_action_chunk`` 接口预测整段 chunk 并自行管理动作
+    队列，因此不依赖 SmolVLA 内部的私有队列结构，对其他 chunking 策略
+    （ACT 等）同样适用。
+    """
+
+    def __init__(self, policy: Any, blend_frames: int) -> None:
+        """包一层策略，并在重预测时对 chunk 前 K 帧做衔接平滑。"""
+        self._policy = policy
+        self._k = max(0, int(blend_frames))
+        self._queue: list[NDArray[np.float64]] = []
+        self._prev_chunk: NDArray[np.float64] | None = None
+        self._out_device: Any = "cpu"
+        self._out_dtype: Any = None
+
+    @property
+    def config(self) -> Any:
+        """转发到底层策略配置，便于运行入口覆盖 ``n_action_steps``。"""
+        return self._policy.config
+
+    def reset(self) -> None:
+        """重置底层策略与包装器的队列和衔接状态。"""
+        if hasattr(self._policy, "reset"):
+            self._policy.reset()
+        self._queue = []
+        self._prev_chunk = None
+
+    def select_action(self, batch: Any, **kwargs: Any) -> Any:
+        """返回单帧动作；队列耗尽时预测整段新 chunk 并做衔接平滑。
+
+        返回值与底层 ``select_action`` 保持一致（torch Tensor），以便策略
+        后处理器（postprocessor）能正常解析；blend 计算在 numpy 侧完成。
+        """
+        if not self._queue:
+            import torch
+
+            chunk = self._policy.predict_action_chunk(batch, **kwargs)
+            if torch.is_tensor(chunk):
+                self._out_device = chunk.device
+                self._out_dtype = chunk.dtype
+            else:
+                self._out_device = "cpu"
+                self._out_dtype = torch.float32
+            chunk_np = _tensor_to_numpy_action_chunk(chunk)
+            horizon = int(getattr(self._policy.config, "n_action_steps", len(chunk_np)))
+            chunk_np = chunk_np[:horizon]
+            chunk_np = self._blend_chunk(chunk_np)
+            self._prev_chunk = chunk_np.copy()
+            self._queue = [chunk_np[i] for i in range(len(chunk_np))]
+        import torch
+
+        frame = self._queue.pop(0)
+        dtype = self._out_dtype if self._out_dtype is not None else torch.float32
+        return torch.as_tensor(frame, device=self._out_device, dtype=dtype)
+
+    def _blend_chunk(self, chunk: NDArray[np.float64]) -> NDArray[np.float64]:
+        """用旧 chunk 尾帧作锚点，对新 chunk 前 K 帧做带回卷的线性插值。"""
+        if self._k <= 0 or self._prev_chunk is None:
+            return chunk
+        anchor = self._prev_chunk[-1]  # 旧 chunk 尾帧，边界时实际到达的目标
+        horizon = chunk.shape[0]
+        k = min(self._k, horizon)
+        blended = chunk.copy()
+        for t in range(k):
+            if k == 1:
+                weight = 0.5
+            else:
+                weight = (t + 1) / k  # t=0 -> 1/k 小幅前进，t=k-1 -> 1 贴合新 chunk
+            for i in range(6):  # 关节角：回卷后向锚点靠拢
+                delta = _wrap_angle(chunk[t, i] - anchor[i])
+                blended[t, i] = anchor[i] + weight * delta
+            blended[t, 6] = chunk[t, 6]  # 夹爪：透传新 chunk 值，不插值
+        return blended
+
+
 def rollout_artifact_stem(spec: RolloutSpec) -> str:
     """生成视频和动作日志共用的稳定文件名。"""
     return f"scene_{spec.scene_seed}_policy_{spec.policy_seed}_{spec.task_id}_{spec.prompt_type}"
@@ -331,6 +449,7 @@ def run_single_rollout(
     environment: str = "cube",
     appearance_variant: str = "original",
     motion_limiter_settings: dict[str, Any] | None = None,
+    chunk_blend: int = 0,
 ) -> RolloutResult:
     """执行一条固定场景和模型随机种子的闭环rollout。
 
@@ -441,6 +560,7 @@ def run_single_rollout(
                         "rollout_key": spec.key,
                         "step": step_index + 1,
                         "chunk_start": step_index % execution_horizon == 0,
+                        "chunk_blend": chunk_blend,
                         "model_output": model_output_vector.tolist(),
                         "physical_action": physical_action_vector.tolist(),
                         "range_safe_action": safe_action.command.astype(np.float64).tolist(),
@@ -641,6 +761,7 @@ def build_manifest(
     appearance_variant: str,
     appearance_texture_sha256: str,
     motion_limiter: dict[str, Any],
+    chunk_blend: int = 0,
 ) -> dict[str, Any]:
     """构造用于恢复校验的完整运行清单。"""
     return {
@@ -659,6 +780,7 @@ def build_manifest(
         "appearance_variant": appearance_variant,
         "appearance_texture_sha256": appearance_texture_sha256,
         "motion_limiter": motion_limiter,
+        "chunk_blend": chunk_blend,
         "keep_all_videos": keep_all_videos,
         "config": config,
         "rollout_count": len(specs),
@@ -687,9 +809,15 @@ def manifest_identity(manifest: dict[str, Any]) -> dict[str, Any]:
         "appearance_variant",
         "appearance_texture_sha256",
         "motion_limiter",
+        "chunk_blend",
         "keep_all_videos",
     )
-    return {key: manifest.get(key) for key in keys}
+    identity = {key: manifest.get(key) for key in keys}
+    # schema_version=4及更早版本尚未记录chunk_blend。缺失字段与当前默认
+    # 关闭(0)完全等价，避免为默认值升级错误拒绝续跑。
+    if identity["chunk_blend"] is None:
+        identity["chunk_blend"] = 0
+    return identity
 
 
 def prepare_run(output_dir: Path, manifest: dict[str, Any], resume: bool) -> list[RolloutResult]:
@@ -743,6 +871,7 @@ def update_manifest_identity(manifest: dict[str, Any]) -> dict[str, Any]:
         "appearance_variant",
         "appearance_texture_sha256",
         "motion_limiter",
+        "chunk_blend",
         "keep_all_videos",
         "config",
     )
@@ -751,6 +880,9 @@ def update_manifest_identity(manifest: dict[str, Any]) -> dict[str, Any]:
     # 配置未启用限制器完全等价，避免为默认值升级错误拒绝失败项重跑。
     if identity["motion_limiter"] is None:
         identity["motion_limiter"] = {"enabled": False}
+    # schema_version=4及更早版本尚未记录chunk_blend，缺失等价于默认关闭(0)。
+    if identity["chunk_blend"] is None:
+        identity["chunk_blend"] = 0
     return identity
 
 
@@ -1344,6 +1476,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         evaluation,
         args.execution_horizon,
     )
+    chunk_blend = max(0, int(args.chunk_blend))
+    if chunk_blend > chunk_size:
+        raise ValueError(f"chunk-blend不能超过模型chunk_size: {chunk_blend} > {chunk_size}")
     full_specs = build_specs(evaluation)
     specs = select_scene_specs(full_specs, args.scene_seed)
     if args.max_rollouts is not None:
@@ -1377,6 +1512,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         appearance_variant,
         appearance_texture_sha256,
         motion_limiter,
+        chunk_blend,
     )
     update_info: dict[str, Any] | None = None
     if args.rerun_failures:
@@ -1408,6 +1544,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.device,
             execution_horizon,
         )
+        if chunk_blend > 0:
+            policy = ChunkBlendPolicy(policy, chunk_blend)
         if args.rerun_failures:
             remove_failure_artifacts(output_dir, previous_failures)
         rerun_results: list[RolloutResult] = []
@@ -1426,6 +1564,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 environment,
                 appearance_variant,
                 motion_limiter,
+                chunk_blend,
             )
             if args.rerun_failures:
                 rerun_results.append(result)
