@@ -155,10 +155,14 @@ outputs/train/smolvla_ur10e_mug_v1_b8_s8000/checkpoints/008000/pretrained_model
   --checkpoint outputs\train\smolvla_ur10e_mug_v1_b8_s8000\checkpoints\008000\pretrained_model `
   --config configs\eval_multi_seed.yaml `
   --output-dir outputs\eval\multi_seed_smoke `
-  --max-rollouts 1 --max-steps 2 --keep-all-videos
+  --max-rollouts 1 --max-steps 2
 ```
 
 只验证 checkpoint 加载、CUDA 前向、随机种子、视频与 manifest，不评价效果。
+
+> 视频保留策略：评测入口默认**保留全部视频**（不再有 `--keep-all-videos` 参数）。
+> 如需裁剪只保留失败视频与每个任务的首条成功视频，加 `--prune-videos`。本实验为了
+> GitHub 主页展示保留全部视频，命令不加该参数即可。
 
 ### 4.2 计时外推
 
@@ -170,7 +174,7 @@ outputs/train/smolvla_ur10e_mug_v1_b8_s8000/checkpoints/008000/pretrained_model
   --checkpoint outputs\train\smolvla_ur10e_mug_v1_b8_s8000\checkpoints\008000\pretrained_model `
   --config configs\eval_multi_seed.yaml `
   --output-dir outputs\eval\multi_seed_pilot `
-  --max-rollouts 4 --keep-all-videos
+  --max-rollouts 4
 ```
 
 ```text
@@ -217,6 +221,40 @@ analysis/
 ├── multi_seed_report.md     # 人工可读：per-seed 表、总体 CI、敏感性、分任务
 └── multi_seed_summary.json  # 机器可读：全部统计字段
 ```
+
+## 4.5 GitHub 主页视频展示
+
+评测默认保留全部 rollout 视频（`outputs\eval\...\videos\*.mp4`），但项目 `.gitignore`
+同时忽略 `outputs/` 与 `*.mp4`，**视频默认不会进入 Git 仓库**。若要用于 GitHub 主页
+展示，三选一：
+
+1. **精选视频入库（推荐少量）**：把要展示的成功/失败样例复制到非忽略目录（如
+   `assets/demo/`），并修改 `.gitignore` 允许该目录的 mp4：
+
+   ```gitignore
+   # 允许主页演示视频（放在 .gitignore 末尾）
+   !assets/demo/
+   assets/demo/*
+   !assets/demo/*.mp4
+   ```
+
+   然后在 README 中以相对链接引用：
+
+   ```markdown
+   ## Demo
+
+   - [成功：mug_on_blue](assets/demo/mug_on_blue_success.mp4)
+   - [失败：mug_on_yellow](assets/demo/mug_on_yellow_failure.mp4)
+   ```
+
+   GitHub 的 blob 页面支持直接预览 mp4，点击链接即可播放。
+
+2. **GitHub Releases**：把完整 `videos/` 打包 zip 传到 Release 附件，README 给出下载
+   链接，适合保留全部视频且不撑大仓库。
+
+3. **外链托管**：上传到 YouTube/图床，README 用普通链接或 `<video>` 嵌入。
+
+> 注意：每次 `git push` 前先确认 `.gitignore` 规则，避免误把 GB 级视频推入仓库。
 
 ## 5. 结果检查
 
