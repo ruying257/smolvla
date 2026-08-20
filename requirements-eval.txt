@@ -1,0 +1,31 @@
+# SmolVLA local closed-loop evaluation environment
+# Target: Windows 11 / NVIDIA RTX 4060 (Ada) / conda Python 3.10
+# Aligned with constraints.txt. PyPI torch 2.7.0 wheels are the cu126 CUDA build,
+# which is compatible with RTX 4060; no separate PyTorch index is required.
+# Evaluation is headless: no glfw / GUI deps needed (mujoco.Renderer offscreen).
+
+# --- Deep learning core (CUDA 12.6 build, from PyPI / mirrors) ---
+torch==2.7.0
+torchvision==0.22.0
+
+# --- LeRobot 0.4.4 + SmolVLA policy ---
+lerobot[smolvla]==0.4.4
+transformers==4.57.1
+huggingface-hub==0.35.3
+datasets==4.4.1
+accelerate==1.11.0
+safetensors==0.6.2
+
+# --- MuJoCo simulation ---
+mujoco==3.6.0
+numpy==2.2.6
+
+# --- Video encoding and utilities ---
+av==15.1.0
+imageio==2.37.0
+imageio-ffmpeg==0.6.0
+opencv-python-headless==4.12.0.88
+PyYAML==6.0.2
+
+# Optional: uncomment only if lerobot reports a missing torchcodec at import time.
+# torchcodec==0.5.0

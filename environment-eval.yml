@@ -1,0 +1,11 @@
+# 一键创建 smolvla-eval 评测环境（conda + pip，pip 走清华镜像）
+# 用法: conda env create -f environment-eval.yml
+name: smolvla-eval
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+      - --index-url https://pypi.tuna.tsinghua.edu.cn/simple
+      - -r requirements-eval.txt
