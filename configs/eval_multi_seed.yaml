@@ -1,0 +1,38 @@
+# 多 policy_seed 统计 + Bootstrap 置信区间实验配置。
+# 派生自 eval_standard.yaml：正式 10 个未见场景 × 4 任务 × 3 措辞 = 120 条件，
+# 每个条件用 N=3 个 policy seed 重复闭环评测，共 360 条 rollout。
+# 快速档使用 3 个 seed；如需严谨档改为 5 个连续 seed（见 policy_seeds 注释）。
+evaluation:
+  output_dir: outputs/eval/formal_020000_multiseed
+  fps: 20
+  # 专家轨迹最大351步，400步即20秒仿真时间，并提供约14%的完成余量。
+  max_steps: 400
+  # 训练seed范围为0-9和100-139；正式测试使用完全未见的10000-10009。
+  scene_seeds:
+    - 10000
+    - 10001
+    - 10002
+    - 10003
+    - 10004
+    - 10005
+    - 10006
+    - 10007
+    - 10008
+    - 10009
+  task_ids:
+    - red_on_blue
+    - red_on_yellow
+    - green_on_blue
+    - green_on_yellow
+  # canonical和synonym均在训练中出现；unseen用于语言泛化测试。
+  prompt_types:
+    - canonical
+    - synonym
+    - unseen
+  # 多seed实验：20260与既有正式120条实验完全可比；20261、20262为额外采样种子，
+  # 仅改变Flow Matching采样噪声，不改变权重、场景或任务。
+  # 严谨档可扩为 20260..20264（5个seed，共600条）。
+  policy_seeds:
+    - 20260
+    - 20261
+    - 20262
