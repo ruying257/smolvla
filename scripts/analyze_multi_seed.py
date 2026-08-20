@@ -365,8 +365,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.repeats,
         args.bootstrap_seed,
     )
-    print(f"已写出: {summary_path}")
-    print(f"已写出: {report_path}")
+    print(f"Wrote: {summary_path}")
+    print(f"Wrote: {report_path}")
     return 0
 
 
