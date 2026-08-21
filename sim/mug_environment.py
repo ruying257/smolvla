@@ -536,6 +536,7 @@ class MugTabletopEnv(CleanTabletopEnv):
             else float(self.data.time) - float(self._mug_stable_since[task_id])
         )
         gripper_released = bool(self.get_state()[6] < 0.5)
+        bottom_z = float(self._site_position(MUG_BOTTOM_SITE_NAME)[2])
         success = (
             target_inside
             and stable_duration >= STABLE_DURATION_SECONDS
@@ -565,6 +566,8 @@ class MugTabletopEnv(CleanTabletopEnv):
                 "center_inside": center_inside,
                 "correct_height": correct_height,
                 "upright": upright,
+                "target_inside": target_inside,
+                "bottom_z": bottom_z,
                 "inside_other_pad": inside_other,
                 "linear_speed": linear_speed,
                 "angular_speed": angular_speed,

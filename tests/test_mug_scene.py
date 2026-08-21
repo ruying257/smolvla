@@ -171,6 +171,11 @@ class MugTabletopEnvTest(unittest.TestCase):
             success = self.env.evaluate_task(task_id)
             self.assertTrue(success.success)
             self.assertEqual(success.failure_mode, "success")
+            self.assertTrue(success.metrics["target_inside"])
+            self.assertAlmostEqual(
+                float(success.metrics["bottom_z"]),
+                float(self.env.task_layout()[MUG_BODY_NAME]["bottom_site_position"][2]),
+            )
 
     def test_wrong_pad_is_classified(self) -> None:
         """杯子稳定放到另一颜色区域时应分类为wrong_pad。"""

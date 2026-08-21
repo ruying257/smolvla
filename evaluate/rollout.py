@@ -36,7 +36,12 @@ from evaluate.common import (
     write_json,
 )
 from sim.environment import CleanTabletopEnv
-from sim.mug_environment import MUG_TASK_IDS, MugTabletopEnv, resolve_mug_texture_path
+from sim.mug_environment import (
+    MUG_BODY_NAME,
+    MUG_TASK_IDS,
+    MugTabletopEnv,
+    resolve_mug_texture_path,
+)
 
 
 TASKS = task_spec_module.TASKS
@@ -54,6 +59,8 @@ ACTION_CLIPPING_CSV = "action_clipping_by_dimension.csv"
 MOTION_METRICS_CSV = "motion_metrics_by_rollout.csv"
 MOTION_METRICS_JSON = "motion_metrics_summary.json"
 MOTION_METRICS_REPORT = "motion_metrics_report.md"
+STAGE_METRICS_CSV = "stage_metrics_by_rollout.csv"
+STAGE_METRICS_JSON = "stage_metrics_summary.json"
 ACTION_DIMENSIONS = (
     "shoulder_pan",
     "shoulder_lift",
@@ -69,6 +76,26 @@ DEFAULT_GRIPPER_FILTER = {
     "open_threshold": 0.05,
     "close_confirmation_frames": 2,
     "open_confirmation_frames": 3,
+}
+DEFAULT_STAGE_DETECTION = {
+    "enabled": True,
+    "gripper_closed_threshold": 0.5,
+    "lift_delta_m": 0.015,
+}
+STAGE_NAMES = ("S1", "S2", "S3", "S4", "S5")
+STAGE_LABELS = {
+    "S1": "grasp_lift",
+    "S2": "transport",
+    "S3": "place_inside",
+    "S4": "release",
+    "S5": "success",
+}
+STAGE_ATTRIBUTIONS = {
+    "S1": "视觉定位、夹爪策略或动作块起始段问题",
+    "S2": "移动规划或目标区域空间理解问题",
+    "S3": "放置精度或末端姿态控制问题",
+    "S4": "动作序列或夹爪指令时序问题",
+    "S5": "稳定时长、物体稳定性或其他严格成功条件未满足",
 }
 
 
@@ -208,6 +235,136 @@ class GripperHysteresisFilter:
             transitioned=transitioned,
             transition=transition,
         )
+
+
+@dataclass(frozen=True)
+class MugStageStepResult:
+    """一帧杯子任务阶段检测结果。"""
+
+    current_conditions: dict[str, bool]
+    direct_reached: dict[str, bool]
+    first_reached_step: dict[str, int | None]
+    first_reached_seconds: dict[str, float | None]
+    sequential_stage: str
+    transition: str
+    highest_direct_stage: str
+    order_anomaly: bool
+
+
+class MugStageTracker:
+    """按直接命中和严格顺序两条轨道跟踪杯子任务阶段。"""
+
+    def __init__(
+        self,
+        initial_bottom_z: float,
+        gripper_closed_threshold: float = 0.5,
+        lift_delta_m: float = 0.015,
+    ) -> None:
+        """初始化一条 rollout 独占的阶段跟踪器。
+
+        Args:
+            initial_bottom_z: 环境重置稳定后、首个动作前的杯底高度。
+            gripper_closed_threshold: 真实夹爪状态被视为闭合的包含阈值。
+            lift_delta_m: 杯底相对初始位置的最小离桌高度。
+
+        Raises:
+            ValueError: 高度或阈值不是有效数值时抛出。
+        """
+        values = np.asarray(
+            [initial_bottom_z, gripper_closed_threshold, lift_delta_m],
+            dtype=np.float64,
+        )
+        if not np.isfinite(values).all():
+            raise ValueError("阶段检测参数必须为有限数值")
+        if not 0.0 <= gripper_closed_threshold <= 1.0:
+            raise ValueError("gripper_closed_threshold必须位于[0,1]")
+        if lift_delta_m <= 0.0:
+            raise ValueError("lift_delta_m必须大于零")
+        self.initial_bottom_z = float(initial_bottom_z)
+        self.gripper_closed_threshold = float(gripper_closed_threshold)
+        self.lift_delta_m = float(lift_delta_m)
+        self.lift_threshold_z = self.initial_bottom_z + self.lift_delta_m
+        self._direct_reached = {stage: False for stage in STAGE_NAMES}
+        self._first_reached_step: dict[str, int | None] = {
+            stage: None for stage in STAGE_NAMES
+        }
+        self._first_reached_seconds: dict[str, float | None] = {
+            stage: None for stage in STAGE_NAMES
+        }
+        self._sequential_index = -1
+        self._order_anomaly = False
+
+    def update(
+        self,
+        step: int,
+        elapsed_seconds: float,
+        gripper_state: float,
+        metrics: dict[str, float | bool],
+        success: bool,
+    ) -> MugStageStepResult:
+        """使用动作执行后的真实状态更新一帧阶段结果。"""
+        if step <= 0 or elapsed_seconds < 0.0:
+            raise ValueError("阶段检测的step必须为正数且时间不得为负")
+        bottom_z = float(metrics["bottom_z"])
+        airborne = bool(
+            np.isfinite(bottom_z)
+            and (
+                bottom_z >= self.lift_threshold_z
+                or np.isclose(bottom_z, self.lift_threshold_z, rtol=0.0, atol=1e-12)
+            )
+        )
+        target_inside = bool(metrics.get("target_inside", False))
+        current = {
+            "S1": bool(float(gripper_state) >= self.gripper_closed_threshold and airborne),
+            "S2": bool(metrics.get("center_inside", False)) and airborne,
+            "S3": target_inside,
+            "S4": target_inside and bool(metrics.get("gripper_released", False)),
+            "S5": bool(success),
+        }
+        for stage in STAGE_NAMES:
+            if current[stage] and not self._direct_reached[stage]:
+                self._direct_reached[stage] = True
+                self._first_reached_step[stage] = int(step)
+                self._first_reached_seconds[stage] = float(elapsed_seconds)
+
+        previous_stage = self.sequential_stage
+        while self._sequential_index + 1 < len(STAGE_NAMES):
+            next_stage = STAGE_NAMES[self._sequential_index + 1]
+            if not current[next_stage]:
+                break
+            self._sequential_index += 1
+        sequential_stage = self.sequential_stage
+        transition = (
+            "none"
+            if sequential_stage == previous_stage
+            else f"{previous_stage}->{sequential_stage}"
+        )
+
+        seen_gap = False
+        for stage in STAGE_NAMES:
+            if not self._direct_reached[stage]:
+                seen_gap = True
+            elif seen_gap:
+                self._order_anomaly = True
+        reached_indices = [
+            index for index, stage in enumerate(STAGE_NAMES) if self._direct_reached[stage]
+        ]
+        highest_direct_stage = STAGE_NAMES[max(reached_indices)] if reached_indices else "none"
+        return MugStageStepResult(
+            current_conditions=current,
+            direct_reached=dict(self._direct_reached),
+            first_reached_step=dict(self._first_reached_step),
+            first_reached_seconds=dict(self._first_reached_seconds),
+            sequential_stage=sequential_stage,
+            transition=transition,
+            highest_direct_stage=highest_direct_stage,
+            order_anomaly=self._order_anomaly,
+        )
+
+    @property
+    def sequential_stage(self) -> str:
+        """返回严格顺序轨道当前到达的最高阶段。"""
+        return STAGE_NAMES[self._sequential_index] if self._sequential_index >= 0 else "none"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -448,6 +605,42 @@ def resolve_gripper_filter(evaluation: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def resolve_stage_detection(evaluation: dict[str, Any]) -> dict[str, Any]:
+    """解析只影响观测与报告的杯子失败阶段检测配置。"""
+    section = evaluation.get("stage_detection", {})
+    if section is None:
+        section = {}
+    if not isinstance(section, dict):
+        raise ValueError("stage_detection配置必须是映射")
+    enabled = section.get("enabled", DEFAULT_STAGE_DETECTION["enabled"])
+    if not isinstance(enabled, bool):
+        raise ValueError("stage_detection.enabled必须是布尔值")
+    if not enabled:
+        return {"enabled": False}
+    gripper_threshold = section.get(
+        "gripper_closed_threshold",
+        DEFAULT_STAGE_DETECTION["gripper_closed_threshold"],
+    )
+    lift_delta = section.get("lift_delta_m", DEFAULT_STAGE_DETECTION["lift_delta_m"])
+    for name, value in (
+        ("gripper_closed_threshold", gripper_threshold),
+        ("lift_delta_m", lift_delta),
+    ):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"stage_detection.{name}必须是数值")
+    gripper_threshold = float(gripper_threshold)
+    lift_delta = float(lift_delta)
+    if not np.isfinite(gripper_threshold) or not 0.0 <= gripper_threshold <= 1.0:
+        raise ValueError("stage_detection.gripper_closed_threshold必须位于[0,1]")
+    if not np.isfinite(lift_delta) or lift_delta <= 0.0:
+        raise ValueError("stage_detection.lift_delta_m必须大于零")
+    return {
+        "enabled": True,
+        "gripper_closed_threshold": gripper_threshold,
+        "lift_delta_m": lift_delta,
+    }
+
+
 def load_policy_bundle(
     checkpoint: Path,
     device: str,
@@ -627,6 +820,7 @@ def run_single_rollout(
     motion_limiter_settings: dict[str, Any] | None = None,
     chunk_blend: int = 0,
     gripper_filter_settings: dict[str, Any] | None = None,
+    stage_detection_settings: dict[str, Any] | None = None,
 ) -> RolloutResult:
     """执行一条固定场景和模型随机种子的闭环rollout。
 
@@ -646,6 +840,7 @@ def run_single_rollout(
         motion_limiter_settings: 已解析的限制器配置；未启用时为``None``或``enabled=false``。
         chunk_blend: 动作chunk边界插值帧数。
         gripper_filter_settings: 已解析的夹爪迟滞过滤配置。
+        stage_detection_settings: 已解析的杯子阶段检测配置。
 
     Returns:
         单条闭环评测结果。
@@ -691,6 +886,31 @@ def run_single_rollout(
         ) as writer, action_trace_path.open("w", encoding="utf-8", newline="\n") as trace_file:
             env.reset(spec.scene_seed)
             policy.reset()
+            stage_settings = (
+                stage_detection_settings
+                if stage_detection_settings is not None
+                else resolve_stage_detection({})
+            )
+            stage_detection_applicable = spec.task_id in MUG_TASK_IDS
+            stage_detection_enabled = bool(
+                stage_detection_applicable and stage_settings.get("enabled", False)
+            )
+            stage_tracker: MugStageTracker | None = None
+            if stage_detection_enabled:
+                initial_layout = env.task_layout()
+                initial_bottom_z = float(
+                    np.asarray(
+                        initial_layout[MUG_BODY_NAME]["bottom_site_position"],
+                        dtype=np.float64,
+                    )[2]
+                )
+                stage_tracker = MugStageTracker(
+                    initial_bottom_z=initial_bottom_z,
+                    gripper_closed_threshold=float(
+                        stage_settings["gripper_closed_threshold"]
+                    ),
+                    lift_delta_m=float(stage_settings["lift_delta_m"]),
+                )
             physics_steps = max(1, round((1.0 / fps) / float(env.model.opt.timestep)))
             action_lower = np.concatenate([env.model.actuator_ctrlrange[:6, 0], [0.0]])
             action_upper = np.concatenate([env.model.actuator_ctrlrange[:6, 1], [1.0]])
@@ -762,6 +982,38 @@ def run_single_rollout(
                     reference_velocity = limiter.reference_velocity
                 env.apply_joint_action(executed_action, physics_steps=physics_steps)
                 actual_state_after = env.get_state()
+                completed_steps = step_index + 1
+                evaluation = env.evaluate_task(spec.task_id, completed_steps / fps, max_steps / fps)
+                stage_result: MugStageStepResult | None = None
+                if stage_tracker is not None:
+                    stage_result = stage_tracker.update(
+                        step=completed_steps,
+                        elapsed_seconds=completed_steps / fps,
+                        gripper_state=float(actual_state_after[6]),
+                        metrics=evaluation.metrics,
+                        success=evaluation.success,
+                    )
+                stage_trace: dict[str, Any] = {
+                    "stage_detection_applicable": stage_detection_applicable,
+                    "stage_detection_enabled": stage_detection_enabled,
+                }
+                if stage_tracker is not None and stage_result is not None:
+                    stage_trace.update(
+                        {
+                            "initial_bottom_z": stage_tracker.initial_bottom_z,
+                            "bottom_z": float(evaluation.metrics["bottom_z"]),
+                            "lift_threshold_z": stage_tracker.lift_threshold_z,
+                            "stage_current_conditions": stage_result.current_conditions,
+                            "stage_direct_reached": stage_result.direct_reached,
+                            "stage_first_reached_step": stage_result.first_reached_step,
+                            "stage_first_reached_seconds": stage_result.first_reached_seconds,
+                            "sequential_stage": stage_result.sequential_stage,
+                            "stage_transition": stage_result.transition,
+                            "highest_direct_stage": stage_result.highest_direct_stage,
+                            "stage_order_anomaly": stage_result.order_anomaly,
+                            "task_metrics": dict(evaluation.metrics),
+                        }
+                    )
                 write_action_trace_record(
                     trace_file,
                     {
@@ -793,10 +1045,9 @@ def run_single_rollout(
                         "actual_qpos_after": np.asarray(actual_state_after[:6], dtype=np.float64).tolist(),
                         "actual_qvel_after": env.get_arm_qvel().astype(np.float64).tolist(),
                         "ee_position_after": env.get_end_effector_position().astype(np.float64).tolist(),
+                        **stage_trace,
                     },
                 )
-                completed_steps = step_index + 1
-                evaluation = env.evaluate_task(spec.task_id, completed_steps / fps, max_steps / fps)
                 failure_mode = evaluation.failure_mode
                 if evaluation.success or failure_mode in {
                     "wrong_cube",
@@ -978,10 +1229,11 @@ def build_manifest(
     motion_limiter: dict[str, Any],
     chunk_blend: int = 0,
     gripper_filter: dict[str, Any] | None = None,
+    stage_detection: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """构造用于恢复校验的完整运行清单。"""
     return {
-        "schema_version": 5,
+        "schema_version": 6,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "checkpoint_path": str(checkpoint.resolve()),
         "checkpoint_sha256": checkpoint_sha256,
@@ -998,6 +1250,9 @@ def build_manifest(
         "motion_limiter": motion_limiter,
         "chunk_blend": chunk_blend,
         "gripper_filter": gripper_filter if gripper_filter is not None else resolve_gripper_filter({}),
+        "stage_detection": (
+            stage_detection if stage_detection is not None else resolve_stage_detection({})
+        ),
         "keep_all_videos": keep_all_videos,
         "config": config,
         "rollout_count": len(specs),
@@ -1108,6 +1363,15 @@ def update_manifest_identity(manifest: dict[str, Any]) -> dict[str, Any]:
     # 旧结果缺少夹爪过滤配置时，明确解释为连续值透传。
     if identity["gripper_filter"] is None:
         identity["gripper_filter"] = {"enabled": False}
+    config = identity.get("config")
+    if isinstance(config, dict):
+        normalized_config = dict(config)
+        evaluation = normalized_config.get("evaluation")
+        if isinstance(evaluation, dict):
+            normalized_evaluation = dict(evaluation)
+            normalized_evaluation.pop("stage_detection", None)
+            normalized_config["evaluation"] = normalized_evaluation
+        identity["config"] = normalized_config
     return identity
 
 
@@ -1501,6 +1765,176 @@ def write_motion_metrics_outputs(output_dir: Path, results: list[RolloutResult],
     return summary
 
 
+def _stage_metrics_row(result: RolloutResult) -> dict[str, Any]:
+    """从一条 rollout 的最后一帧阶段遥测生成逐轨迹记录。"""
+    row: dict[str, Any] = {
+        "rollout_key": result.rollout_key,
+        "scene_seed": result.scene_seed,
+        "policy_seed": result.policy_seed,
+        "task_id": result.task_id,
+        "prompt_type": result.prompt_type,
+        "success": result.success,
+        "failure_mode": result.failure_mode,
+        "analysis_status": "unavailable",
+        "sequential_stage": "none",
+        "highest_direct_stage": "none",
+        "failure_stage": "unavailable",
+        "stage_order_anomaly": False,
+    }
+    for stage in STAGE_NAMES:
+        key = stage.lower()
+        row[f"{key}_reached"] = ""
+        row[f"{key}_first_step"] = ""
+        row[f"{key}_first_seconds"] = ""
+    if result.task_id not in MUG_TASK_IDS:
+        row["analysis_status"] = "not_applicable"
+        row["failure_stage"] = "not_applicable"
+        return row
+    if not result.action_trace_path:
+        return row
+    trace_path = Path(result.action_trace_path)
+    if not trace_path.is_file():
+        return row
+    records: list[dict[str, Any]] = []
+    for line_number, line in enumerate(trace_path.read_text(encoding="utf-8").splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"{trace_path.name}第{line_number}行阶段记录损坏: {exc}") from exc
+        if record.get("rollout_key") != result.rollout_key:
+            raise ValueError(f"阶段记录实验键不匹配: {trace_path.name}第{line_number}行")
+        if "stage_direct_reached" in record:
+            records.append(record)
+    if not records:
+        return row
+
+    final = records[-1]
+    direct = final.get("stage_direct_reached")
+    first_steps = final.get("stage_first_reached_step")
+    first_seconds = final.get("stage_first_reached_seconds")
+    if not all(isinstance(value, dict) for value in (direct, first_steps, first_seconds)):
+        raise ValueError(f"{trace_path.name}末帧阶段累计字段格式错误")
+    for stage in STAGE_NAMES:
+        if stage not in direct or stage not in first_steps or stage not in first_seconds:
+            raise ValueError(f"{trace_path.name}末帧缺少{stage}阶段累计字段")
+        key = stage.lower()
+        row[f"{key}_reached"] = bool(direct[stage])
+        row[f"{key}_first_step"] = first_steps[stage] if first_steps[stage] is not None else ""
+        row[f"{key}_first_seconds"] = (
+            first_seconds[stage] if first_seconds[stage] is not None else ""
+        )
+    partial = bool(result.error or result.failure_mode == "control_exception")
+    row.update(
+        {
+            "analysis_status": "partial" if partial else "complete",
+            "sequential_stage": str(final.get("sequential_stage", "none")),
+            "highest_direct_stage": str(final.get("highest_direct_stage", "none")),
+            "stage_order_anomaly": bool(final.get("stage_order_anomaly", False)),
+        }
+    )
+    if partial:
+        row["failure_stage"] = "unavailable"
+    elif result.success:
+        row["failure_stage"] = "none"
+    else:
+        row["failure_stage"] = next(
+            (stage for stage in STAGE_NAMES if not bool(direct[stage])),
+            "S5",
+        )
+    return row
+
+
+def summarize_stage_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """汇总可分析杯子轨迹的阶段漏斗、归因和到达时间。"""
+    eligible = [row for row in rows if row["analysis_status"] == "complete"]
+    statuses = {
+        status: sum(row["analysis_status"] == status for row in rows)
+        for status in ("complete", "partial", "unavailable", "not_applicable")
+    }
+    reached: dict[str, dict[str, Any]] = {}
+    previous_eligible = eligible
+    for stage in STAGE_NAMES:
+        key = f"{stage.lower()}_reached"
+        count = sum(bool(row[key]) for row in eligible)
+        conditional_count = sum(bool(row[key]) for row in previous_eligible)
+        reached[stage] = {
+            "label": STAGE_LABELS[stage],
+            "reached": count,
+            "rollouts": len(eligible),
+            "reach_rate": count / len(eligible) if eligible else 0.0,
+            "previous_stage_reached": len(previous_eligible),
+            "conditional_reached": conditional_count,
+            "conditional_conversion_rate": (
+                conditional_count / len(previous_eligible) if previous_eligible else 0.0
+            ),
+        }
+        previous_eligible = [row for row in eligible if bool(row[key])]
+
+    first_reached_steps: dict[str, dict[str, float | int]] = {}
+    for stage in STAGE_NAMES:
+        values = [
+            int(row[f"{stage.lower()}_first_step"])
+            for row in eligible
+            if row[f"{stage.lower()}_first_step"] != ""
+        ]
+        first_reached_steps[stage] = {
+            "count": len(values),
+            "median": float(np.median(values)) if values else 0.0,
+            "p90": percentile(values, 90),
+        }
+
+    failed = [row for row in eligible if not bool(row["success"])]
+    failures_by_stage = {
+        stage: sum(row["failure_stage"] == stage for row in failed)
+        for stage in STAGE_NAMES
+    }
+    failure_rates = {
+        stage: failures_by_stage[stage] / len(failed) if failed else 0.0
+        for stage in STAGE_NAMES
+    }
+    cross_tab: dict[str, dict[str, int]] = {}
+    for row in failed:
+        stage = str(row["failure_stage"])
+        mode = str(row["failure_mode"])
+        cross_tab.setdefault(stage, {})[mode] = cross_tab.setdefault(stage, {}).get(mode, 0) + 1
+    return {
+        "schema_version": 1,
+        "result_rollouts": len(rows),
+        "status_counts": statuses,
+        "analyzed_mug_rollouts": len(eligible),
+        "analyzed_failed_mug_rollouts": len(failed),
+        "stages": reached,
+        "first_reached_steps": first_reached_steps,
+        "failures_by_stage": failures_by_stage,
+        "failure_stage_rates": failure_rates,
+        "failure_stage_by_failure_mode": cross_tab,
+        "stage_order_anomalies": sum(bool(row["stage_order_anomaly"]) for row in eligible),
+        "attributions": STAGE_ATTRIBUTIONS,
+    }
+
+
+def write_stage_metrics_outputs(
+    output_dir: Path,
+    results: list[RolloutResult],
+) -> dict[str, Any]:
+    """写出逐 rollout 阶段CSV和总体阶段JSON。"""
+    rows = [_stage_metrics_row(result) for result in results]
+    with (output_dir / STAGE_METRICS_CSV).open("w", encoding="utf-8-sig", newline="") as csv_file:
+        fieldnames = list(rows[0].keys()) if rows else [
+            "rollout_key",
+            "analysis_status",
+            "failure_stage",
+        ]
+        writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    summary = summarize_stage_metrics(rows)
+    write_json(output_dir / STAGE_METRICS_JSON, summary)
+    return summary
+
+
 def summarize_results(results: list[RolloutResult]) -> dict[str, Any]:
     """生成总体、分组、稳定性、动作和延迟统计。"""
     successful = [result for result in results if result.success]
@@ -1600,6 +2034,14 @@ def write_report(
         )
     else:
         gripper_filter_description = "关闭（连续值透传）"
+    stage_detection = manifest.get("stage_detection", {"enabled": False})
+    if stage_detection.get("enabled", False):
+        stage_detection_description = (
+            f"启用（闭爪状态阈值={stage_detection['gripper_closed_threshold']}，"
+            f"离桌增量={stage_detection['lift_delta_m']}m）"
+        )
+    else:
+        stage_detection_description = "关闭"
     lines = [
         "# SmolVLA 闭环评测报告",
         "",
@@ -1614,6 +2056,7 @@ def write_report(
         f"- 控制异常：{summary['control_exceptions']}",
         f"- Execution horizon：{manifest.get('execution_horizon', 'unknown')}步",
         f"- 夹爪迟滞过滤：{gripper_filter_description}",
+        f"- 杯子阶段检测：{stage_detection_description}",
         f"- 杯子外观：`{manifest.get('appearance_variant', 'original')}`",
         f"- 外观纹理SHA-256：`{manifest.get('appearance_texture_sha256', 'not_applicable')}`",
         "",
@@ -1624,6 +2067,32 @@ def write_report(
     ]
     for task_id, value in summary["by_task"].items():
         lines.append(f"| {task_id} | {value['successes']} | {value['rollouts']} | {value['success_rate']:.2%} |")
+    stage_metrics = summary.get("stage_metrics", {})
+    status_counts = stage_metrics.get("status_counts", {})
+    lines.extend(
+        [
+            "",
+            "## 杯子失败阶段",
+            "",
+            f"- 完整可分析轨迹：{status_counts.get('complete', 0)}",
+            f"- 部分可分析轨迹：{status_counts.get('partial', 0)}",
+            f"- 阶段数据不可用：{status_counts.get('unavailable', 0)}",
+            f"- 非杯子任务：{status_counts.get('not_applicable', 0)}",
+            f"- 跳阶段异常：{stage_metrics.get('stage_order_anomalies', 0)}",
+            "",
+            "| 阶段 | 含义 | 到达数 | 到达率 | 相邻阶段转化率 | 失败数 | 归因 |",
+            "| --- | --- | ---: | ---: | ---: | ---: | --- |",
+        ]
+    )
+    for stage in STAGE_NAMES:
+        value = stage_metrics.get("stages", {}).get(stage, {})
+        failures = stage_metrics.get("failures_by_stage", {}).get(stage, 0)
+        lines.append(
+            f"| {stage} | {STAGE_LABELS[stage]} | {value.get('reached', 0)} | "
+            f"{value.get('reach_rate', 0.0):.2%} | "
+            f"{value.get('conditional_conversion_rate', 0.0):.2%} | "
+            f"{failures} | {STAGE_ATTRIBUTIONS[stage]} |"
+        )
     clipping = summary.get("action_clipping", {})
     lines.extend(
         [
@@ -1675,6 +2144,7 @@ def write_results(
         writer.writeheader()
         writer.writerows(asdict(result) for result in results)
     summary = summarize_results(results)
+    summary["stage_metrics"] = write_stage_metrics_outputs(output_dir, results)
     summary["action_clipping"] = write_action_clipping_outputs(output_dir, results)
     summary["motion_metrics"] = write_motion_metrics_outputs(
         output_dir,
@@ -1708,6 +2178,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ValueError("fps和max_steps必须大于零")
     motion_limiter = resolve_motion_limiter(evaluation, fps)
     gripper_filter = resolve_gripper_filter(evaluation)
+    stage_detection = resolve_stage_detection(evaluation)
     execution_horizon, chunk_size = resolve_execution_horizon(
         checkpoint,
         evaluation,
@@ -1751,6 +2222,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         motion_limiter,
         chunk_blend,
         gripper_filter,
+        stage_detection,
     )
     update_info: dict[str, Any] | None = None
     if args.rerun_failures:
@@ -1804,6 +2276,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 motion_limiter,
                 chunk_blend,
                 gripper_filter,
+                stage_detection,
             )
             if args.rerun_failures:
                 rerun_results.append(result)
@@ -1825,6 +2298,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "config": config,
                 "execution_horizon": execution_horizon,
                 "gripper_filter": gripper_filter,
+                "stage_detection": stage_detection,
                 "replayed_rollout_keys": [spec.key for spec in pending],
                 "old_results": [old_results_by_key[spec.key] for spec in pending],
                 "new_results": [asdict(replacements[spec.key]) for spec in pending],

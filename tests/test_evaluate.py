@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import shutil
 import unittest
@@ -24,6 +25,7 @@ from evaluate.common import (
 )
 from evaluate.rollout import (
     GripperHysteresisFilter,
+    MugStageTracker,
     RolloutResult,
     RolloutSpec,
     append_jsonl,
@@ -37,6 +39,7 @@ from evaluate.rollout import (
     retain_videos,
     resolve_execution_horizon,
     resolve_gripper_filter,
+    resolve_stage_detection,
     resolve_motion_limiter,
     run_single_rollout,
     select_scene_specs,
@@ -44,6 +47,7 @@ from evaluate.rollout import (
     source_sha256,
     summarize_action_clipping,
     summarize_results,
+    write_stage_metrics_outputs,
     write_results,
     update_manifest_identity,
 )
@@ -277,6 +281,93 @@ class EvaluationContractTests(unittest.TestCase):
         self.assertEqual(gripper_filter.apply(0.8).command, 0.0)
         self.assertEqual(gripper_filter.apply(1.0).command, 1.0)
 
+    def test_stage_detection_config_defaults_and_validation(self) -> None:
+        """阶段检测应默认启用固定阈值，并拒绝非法观测参数。"""
+        self.assertEqual(
+            resolve_stage_detection({}),
+            {
+                "enabled": True,
+                "gripper_closed_threshold": 0.5,
+                "lift_delta_m": 0.015,
+            },
+        )
+        self.assertEqual(
+            resolve_stage_detection({"stage_detection": {"enabled": False}}),
+            {"enabled": False},
+        )
+        for section in (
+            {"gripper_closed_threshold": -0.1},
+            {"gripper_closed_threshold": 1.1},
+            {"lift_delta_m": 0.0},
+            {"lift_delta_m": "0.015"},
+        ):
+            with self.subTest(section=section), self.assertRaises(ValueError):
+                resolve_stage_detection({"stage_detection": section})
+
+    def test_mug_stage_tracker_reaches_s1_to_s5_in_order(self) -> None:
+        """阶段跟踪器应按真实信号依次推进并记录首次命中时刻。"""
+        tracker = MugStageTracker(initial_bottom_z=0.8)
+        base = {
+            "bottom_z": 0.815,
+            "center_inside": False,
+            "target_inside": False,
+            "gripper_released": False,
+        }
+        s1 = tracker.update(1, 0.05, 0.5, base, False)
+        self.assertEqual(s1.sequential_stage, "S1")
+        s2 = tracker.update(2, 0.10, 0.5, {**base, "center_inside": True}, False)
+        self.assertEqual(s2.sequential_stage, "S2")
+        placed = {**base, "bottom_z": 0.8, "center_inside": True, "target_inside": True}
+        s3 = tracker.update(3, 0.15, 0.5, placed, False)
+        self.assertEqual(s3.sequential_stage, "S3")
+        s4 = tracker.update(4, 0.20, 0.0, {**placed, "gripper_released": True}, False)
+        self.assertEqual(s4.sequential_stage, "S4")
+        s5 = tracker.update(5, 0.25, 0.0, {**placed, "gripper_released": True}, True)
+        self.assertEqual(s5.sequential_stage, "S5")
+        self.assertEqual(s5.first_reached_step, {"S1": 1, "S2": 2, "S3": 3, "S4": 4, "S5": 5})
+        self.assertFalse(s5.order_anomaly)
+
+    def test_mug_stage_tracker_requires_release_while_inside(self) -> None:
+        """历史上放入后在目标外松爪不得直接命中S4。"""
+        tracker = MugStageTracker(initial_bottom_z=0.8)
+        placed = {
+            "bottom_z": 0.8,
+            "center_inside": True,
+            "target_inside": True,
+            "gripper_released": False,
+        }
+        tracker.update(1, 0.05, 0.5, placed, False)
+        released_outside = tracker.update(
+            2,
+            0.10,
+            0.0,
+            {**placed, "center_inside": False, "target_inside": False, "gripper_released": True},
+            False,
+        )
+        self.assertFalse(released_outside.direct_reached["S4"])
+
+    def test_mug_stage_tracker_records_order_anomaly_without_promotion(self) -> None:
+        """直接命中后序阶段时不得补齐前序阶段。"""
+        tracker = MugStageTracker(initial_bottom_z=0.8)
+        result = tracker.update(
+            1,
+            0.05,
+            0.0,
+            {
+                "bottom_z": 0.8,
+                "center_inside": True,
+                "target_inside": True,
+                "gripper_released": True,
+            },
+            False,
+        )
+        self.assertFalse(result.direct_reached["S1"])
+        self.assertFalse(result.direct_reached["S2"])
+        self.assertTrue(result.direct_reached["S3"])
+        self.assertTrue(result.direct_reached["S4"])
+        self.assertEqual(result.sequential_stage, "none")
+        self.assertTrue(result.order_anomaly)
+
     def test_gripper_filter_resets_confirmation_when_sequence_breaks(self) -> None:
         """候选序列被中间值打断后必须重新累计确认帧。"""
         gripper_filter = GripperHysteresisFilter()
@@ -442,6 +533,7 @@ class LocalRolloutTests(unittest.TestCase):
             self.assertIn("actual_qpos_after", first_trace)
             self.assertIn("actual_qvel_after", first_trace)
             self.assertIn("ee_position_after", first_trace)
+            self.assertFalse(first_trace["stage_detection_applicable"])
             summary = write_results(output, [result])
             self.assertEqual(summary["rollouts"], 1)
             self.assertEqual(summary["action_clipping"]["trace_steps"], 2)
@@ -451,6 +543,8 @@ class LocalRolloutTests(unittest.TestCase):
             self.assertTrue((output / "motion_metrics_by_rollout.csv").is_file())
             self.assertTrue((output / "motion_metrics_summary.json").is_file())
             self.assertTrue((output / "motion_metrics_report.md").is_file())
+            self.assertTrue((output / "stage_metrics_by_rollout.csv").is_file())
+            self.assertTrue((output / "stage_metrics_summary.json").is_file())
 
     def test_disabled_gripper_filter_preserves_continuous_command(self) -> None:
         """关闭过滤器时最终执行值必须与原连续夹爪值一致。"""
@@ -474,6 +568,30 @@ class LocalRolloutTests(unittest.TestCase):
             self.assertAlmostEqual(trace["range_safe_action"][6], 0.37, places=6)
             self.assertAlmostEqual(trace["executed_action"][6], 0.37, places=6)
             self.assertEqual(trace["gripper_filter_state"], "passthrough")
+
+    def test_mug_rollout_writes_post_step_stage_telemetry(self) -> None:
+        """杯子短rollout应写出执行后任务指标和双轨阶段状态。"""
+        with workspace_temp_dir() as output:
+            result = run_single_rollout(
+                FakePolicy(),
+                lambda value: value,
+                lambda value: value,
+                spec=RolloutSpec(123, "mug_on_blue", "canonical", 20260),
+                output_dir=output,
+                fps=20,
+                max_steps=1,
+                device="cpu",
+                checkpoint_sha256="abc",
+                execution_horizon=1,
+                environment="mug",
+            )
+            trace = json.loads(Path(result.action_trace_path).read_text(encoding="utf-8"))
+            self.assertTrue(trace["stage_detection_applicable"])
+            self.assertTrue(trace["stage_detection_enabled"])
+            self.assertIn("bottom_z", trace)
+            self.assertIn("target_inside", trace["task_metrics"])
+            self.assertEqual(set(trace["stage_current_conditions"]), {"S1", "S2", "S3", "S4", "S5"})
+            self.assertEqual(set(trace["stage_direct_reached"]), {"S1", "S2", "S3", "S4", "S5"})
 
     def test_joint_motion_limiter_limits_second_order_reference_and_preserves_gripper(self) -> None:
         """限制器必须同时限制速度、加速度，并原样透传夹爪指令。"""
@@ -578,6 +696,126 @@ class ResumeAndStatisticsTests(unittest.TestCase):
             self.assertEqual(clipping["most_frequently_clipped_dimensions"], ["elbow"])
             self.assertEqual(clipping["clipped_trace_step_rate"], 1.0)
             self.assertEqual(clipping["clipped_action_elements"], 3)
+
+    def test_stage_metrics_classify_first_unreached_and_legacy_status(self) -> None:
+        """阶段汇总应归因首个未达成阶段，并区分旧日志与非杯子任务。"""
+        with workspace_temp_dir() as output:
+            mug = fake_result(output, 1, 10, "mug_on_blue", "canonical", False)
+            trace = output / "mug_trace.jsonl"
+            direct = {"S1": True, "S2": True, "S3": False, "S4": False, "S5": False}
+            first_steps = {"S1": 10, "S2": 20, "S3": None, "S4": None, "S5": None}
+            first_seconds = {"S1": 0.5, "S2": 1.0, "S3": None, "S4": None, "S5": None}
+            trace.write_text(
+                json.dumps(
+                    {
+                        "rollout_key": mug.rollout_key,
+                        "stage_direct_reached": direct,
+                        "stage_first_reached_step": first_steps,
+                        "stage_first_reached_seconds": first_seconds,
+                        "sequential_stage": "S2",
+                        "highest_direct_stage": "S2",
+                        "stage_order_anomaly": False,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            mug.action_trace_path = str(trace)
+            legacy = fake_result(output, 2, 10, "mug_on_yellow", "canonical", False)
+            legacy_trace = output / "legacy_trace.jsonl"
+            legacy_trace.write_text(
+                json.dumps({"rollout_key": legacy.rollout_key, "step": 1}) + "\n",
+                encoding="utf-8",
+            )
+            legacy.action_trace_path = str(legacy_trace)
+            cube = fake_result(output, 3, 10, "red_on_blue", "canonical", False)
+
+            summary = write_stage_metrics_outputs(output, [mug, legacy, cube])
+            with (output / "stage_metrics_by_rollout.csv").open(encoding="utf-8-sig") as csv_file:
+                rows = list(csv.DictReader(csv_file))
+            self.assertEqual(rows[0]["failure_stage"], "S3")
+            self.assertEqual(rows[1]["analysis_status"], "unavailable")
+            self.assertEqual(rows[2]["analysis_status"], "not_applicable")
+            self.assertEqual(summary["failures_by_stage"]["S3"], 1)
+            self.assertEqual(summary["status_counts"]["unavailable"], 1)
+
+    def test_stage_metrics_cover_s1_to_s5_success_and_partial_exception(self) -> None:
+        """逐轨迹归因应覆盖五个失败阶段，并排除控制异常的候选归因。"""
+        with workspace_temp_dir() as output:
+            results: list[RolloutResult] = []
+            expected: dict[str, str] = {}
+            for failure_index, failure_stage in enumerate(("S1", "S2", "S3", "S4", "S5")):
+                result = fake_result(output, 10 + failure_index, 10, "mug_on_blue", "canonical", False)
+                direct = {
+                    stage: index < failure_index
+                    for index, stage in enumerate(("S1", "S2", "S3", "S4", "S5"))
+                }
+                trace = output / f"failure_{failure_stage}.jsonl"
+                trace.write_text(
+                    json.dumps(
+                        {
+                            "rollout_key": result.rollout_key,
+                            "stage_direct_reached": direct,
+                            "stage_first_reached_step": {
+                                stage: index + 1 if direct[stage] else None
+                                for index, stage in enumerate(direct)
+                            },
+                            "stage_first_reached_seconds": {
+                                stage: (index + 1) / 20 if direct[stage] else None
+                                for index, stage in enumerate(direct)
+                            },
+                            "sequential_stage": "none" if failure_index == 0 else f"S{failure_index}",
+                            "highest_direct_stage": "none" if failure_index == 0 else f"S{failure_index}",
+                            "stage_order_anomaly": False,
+                        }
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                result.action_trace_path = str(trace)
+                results.append(result)
+                expected[result.rollout_key] = failure_stage
+
+            success = fake_result(output, 20, 10, "mug_on_yellow", "canonical", True)
+            success_trace = output / "success.jsonl"
+            all_reached = {stage: True for stage in ("S1", "S2", "S3", "S4", "S5")}
+            success_trace.write_text(
+                json.dumps(
+                    {
+                        "rollout_key": success.rollout_key,
+                        "stage_direct_reached": all_reached,
+                        "stage_first_reached_step": {stage: index + 1 for index, stage in enumerate(all_reached)},
+                        "stage_first_reached_seconds": {stage: (index + 1) / 20 for index, stage in enumerate(all_reached)},
+                        "sequential_stage": "S5",
+                        "highest_direct_stage": "S5",
+                        "stage_order_anomaly": False,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            success.action_trace_path = str(success_trace)
+            results.append(success)
+            expected[success.rollout_key] = "none"
+
+            partial = fake_result(output, 21, 10, "mug_on_blue", "canonical", False, "control_exception")
+            partial.error = "RuntimeError: synthetic"
+            partial_trace = output / "partial.jsonl"
+            partial_payload = json.loads(Path(results[1].action_trace_path).read_text(encoding="utf-8"))
+            partial_payload["rollout_key"] = partial.rollout_key
+            partial_trace.write_text(json.dumps(partial_payload) + "\n", encoding="utf-8")
+            partial.action_trace_path = str(partial_trace)
+            results.append(partial)
+
+            summary = write_stage_metrics_outputs(output, results)
+            with (output / "stage_metrics_by_rollout.csv").open(encoding="utf-8-sig") as csv_file:
+                rows = {row["rollout_key"]: row for row in csv.DictReader(csv_file)}
+            for rollout_key, failure_stage in expected.items():
+                self.assertEqual(rows[rollout_key]["failure_stage"], failure_stage)
+            self.assertEqual(rows[partial.rollout_key]["analysis_status"], "partial")
+            self.assertEqual(rows[partial.rollout_key]["failure_stage"], "unavailable")
+            self.assertEqual(summary["analyzed_mug_rollouts"], 6)
+            self.assertEqual(summary["status_counts"]["partial"], 1)
 
     def test_video_retention_keeps_failures_and_one_success_per_group(self) -> None:
         """每组只保留首条成功视频，所有失败视频必须保留。"""
