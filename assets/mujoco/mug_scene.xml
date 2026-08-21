@@ -1,6 +1,6 @@
 <mujoco model="smolvla mug placement scene">
   <!--
-    与双积木scene.xml并行存在的杯子场景。机器人、桌面、相机、背景和两个
+    与双积木cube_scene.xml并行存在的杯子场景。机器人、桌面、相机、背景和两个
     放置区域沿用原场景参数；任务物体改为ACT mug_5可交互杯子。
   -->
   <include file="ur10e_with_2f85_d435i.xml"/>

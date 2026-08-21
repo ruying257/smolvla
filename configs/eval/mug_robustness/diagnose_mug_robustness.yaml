@@ -1,0 +1,36 @@
+# Mug 视觉鲁棒性扰动评测配置（2a）。
+# 固定 scene_seed × task × prompt(canonical) × policy_seed=20260，只变化
+# 视觉条件，保证成功率差异可归因于扰动。scene_seed 取 mug_v1 前 5 个
+# seen scenes 作为默认子集；正式全矩阵可扩为全部 20 个 seed。
+diagnostic:
+  environment: mug
+  output_dir: outputs/eval/mug_robustness_010000
+  fps: 20
+  max_steps: 360
+  scene_seeds:
+    - 2291
+    - 6705
+    - 1894
+    - 9864
+    - 8669
+  task_ids:
+    - mug_on_blue
+    - mug_on_yellow
+  prompt_type: canonical
+  policy_seeds:
+    - 20260
+  # 外观变体（环境级，物理一致，纯纹理替换）。
+  appearance_variants:
+    - original
+    - green_white
+    - changed
+  # 像素扰动（图像级）：每种扰动多个强度档，按强度升序排列。
+  pixel_perturbations:
+    brightness: [0.5, 0.7, 0.9]
+    contrast: [0.6, 0.8, 1.2]
+    gamma: [0.6, 0.8, 1.4]
+    gaussian_noise: [5, 15, 30]
+    gaussian_blur: [1, 2, 4]
+    jpeg: [30, 50, 70]
+  # 崩溃阈值规则：成功率首次跌破 max(0.5, baseline - drop_pp) 的最低强度档。
+  collapse_baseline_drop_pp: 20

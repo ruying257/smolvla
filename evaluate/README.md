@@ -364,6 +364,55 @@ CSI = (D_target - D_distractor) / (D_target + D_distractor + epsilon)
 
 FK只把50步绝对关节命令投影为attachment-site的运动学轨迹，用于判断交换目标位置后动作方向是否跟随目标；它不推进动力学、不模拟接触，也不等同于闭环抓取成功。视觉Token、VLM特征或Action Chunk存在差异，也都不能单独证明模型正确识别并抓取了目标积木。
 
+### 3.6 Mug视觉鲁棒性扰动评测
+
+面向杯子任务的"部署前鲁棒性验收"工具：固定 `scene_seed × task × prompt(canonical) × policy_seed=20260`，只变化视觉条件，保证成功率差异可归因于扰动。两类扰动：
+
+- **外观变体**（环境级，物理完全一致）：复用 `MugTabletopEnv(appearance_variant=...)` 替换杯子纹理，目前支持 `original`、`green_white`、`changed` 三种；
+- **像素扰动**（图像级）：亮度/对比度/Gamma/高斯噪声/高斯模糊/JPEG 压缩六种，每种若干强度档，通过图像变换注入闭环观测。
+
+正式配置 `configs/diagnose_mug_robustness.yaml` 默认 5 scenes × 2 任务 ×（外观 3 + 像素 18 档）= 210 条条件；`--max-scenes` 与 `--perturbations` 可收缩冒烟：
+
+```powershell
+conda activate smolvla-eval
+python -m evaluate.diagnose_mug_visual_robustness `
+  --checkpoint outputs\train\smolvla_ur10e_mug_v1_b8_s8000\checkpoints\last\pretrained_model `
+  --config configs\diagnose_mug_robustness.yaml `
+  --output-dir outputs\eval\mug_robustness_010000 `
+  --device cuda
+```
+
+GTX 1650 冒烟只跑亮度维度与前 2 个 scene：
+
+```powershell
+python -m evaluate.diagnose_mug_visual_robustness `
+  --checkpoint outputs\train\smolvla_ur10e_mug_v1_b8_s8000\checkpoints\last\pretrained_model `
+  --config configs\diagnose_mug_robustness.yaml `
+  --output-dir outputs\eval\mug_robustness_smoke `
+  --device cuda `
+  --max-scenes 2 `
+  --perturbations brightness
+```
+
+随机扰动（高斯噪声）使用条件派生的确定性随机种子，同一条件下可复现；`image_transform=None` 时行为与正式评测完全一致。视频记录的是扰动后图像（策略真实所见），便于人工复核。
+
+输出结构：
+
+```text
+outputs/eval/mug_robustness_010000/
+├── run_manifest.json          # checkpoint、配置、扰动定义、纹理SHA-256、扰动审计
+├── rollouts.jsonl             # 逐条件结果，支持断点续跑
+├── robustness_aggregate.csv   # 维度×强度成功率 + Bootstrap 95% CI + 崩溃标记
+├── rollout_detail.csv         # 逐条件明细
+├── summary.json               # 机器可读摘要与崩溃阈值
+├── report.md                  # 人工可读报告（含失败阶段分布）
+├── curves/                    # 每个像素扰动维度的成功率-强度曲线PNG
+├── action_traces/
+└── videos/
+```
+
+崩溃阈值规则：成功率首次跌破 `max(0.5, baseline - 20pp)` 的最低强度档（baseline 为 `original` 无扰动成功率）。同一配置对 baseline 与域随机化训练 checkpoint 各跑一次，可产出对比曲线，支撑"评测发现 → 增强解决 → 复测验证"闭环。
+
 ## 4. 分阶段执行
 
 ### 4.1 自动测试

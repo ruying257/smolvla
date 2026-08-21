@@ -26,6 +26,7 @@ MUG_TEXTURE_ASSET_KEY = "mug_5/visual/image0.png"
 MUG_APPEARANCE_TEXTURES = {
     "original": Path(MUG_TEXTURE_ASSET_KEY),
     "green_white": Path("mug_5/visual/image0_green_white.png"),
+    "changed": Path("mug_5/visual/image0_changed.png"),
 }
 MUG_SAMPLE_X_RANGE = (0.25, 0.39)
 MUG_SAMPLE_Y_RANGE = (-0.35, 0.35)
