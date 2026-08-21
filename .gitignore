@@ -11,11 +11,5 @@ datasets/
 smolvla-data/
 *.mp4
 *.zip
-evaluate/
 
-# evaluate目录历史上整体忽略，仅允许纳入独立诊断入口。
-!evaluate/
-evaluate/*
-!evaluate/diagnose_language.py
-!evaluate/diagnose_conditioning.py
-!evaluate/diagnose_visual_counterfactual.py
+
