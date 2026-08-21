@@ -121,6 +121,23 @@ class RobustnessCondition:
         )
 
 
+def format_intensity_component(intensity: float) -> str:
+    """把扰动强度格式化为稳定、简洁的目录名。"""
+    return format(float(intensity), ".15g")
+
+
+def condition_artifact_subdir(condition: RobustnessCondition) -> Path:
+    """返回视觉条件对应的视频和动作日志相对子目录。"""
+    if condition.appearance_variant is not None:
+        return Path("appearance") / condition.appearance_variant
+    assert condition.perturbation is not None
+    return (
+        Path("pixel")
+        / condition.perturbation.name
+        / format_intensity_component(condition.perturbation.intensity)
+    )
+
+
 # ---------------------------------------------------------------------------
 # 像素扰动实现（输入输出均为 uint8 (256,256,3)）
 # ---------------------------------------------------------------------------
@@ -544,6 +561,7 @@ def run_diagnostic(
                         f"{condition.perturbation.intensity}"
                     )
                 artifact_stem_override = f"{rollout_artifact_stem(spec)}__{suffix}"
+                artifact_subdir_override = condition_artifact_subdir(condition)
                 if condition.appearance_variant is not None:
                     result = run_single_rollout(
                         policy,
@@ -560,6 +578,7 @@ def run_diagnostic(
                         appearance_variant=condition.appearance_variant,
                         stage_detection_settings=stage_detection,
                         artifact_stem_override=artifact_stem_override,
+                        artifact_subdir_override=artifact_subdir_override,
                     )
                 else:
                     assert condition.perturbation is not None
@@ -579,6 +598,7 @@ def run_diagnostic(
                         stage_detection_settings=stage_detection,
                         image_transform=build_image_transform(condition),
                         artifact_stem_override=artifact_stem_override,
+                        artifact_subdir_override=artifact_subdir_override,
                     )
                 tagged = asdict(result)
                 tagged["condition_key"] = condition.key

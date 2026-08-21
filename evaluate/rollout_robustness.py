@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Callable
 
 import numpy as np
@@ -68,15 +69,18 @@ def run_single_rollout(
     stage_detection_settings: dict[str, Any] | None = None,
     image_transform: Callable[[dict[str, np.ndarray]], dict[str, np.ndarray]] | None = None,
     artifact_stem_override: str | None = None,
+    artifact_subdir_override: str | Path | None = None,
 ) -> RolloutResult:
     """执行一条固定场景和模型随机种子的闭环rollout。
 
-    本函数是 ``evaluate.rollout.run_single_rollout`` 的副本，差异有二：
+    本函数是 ``evaluate.rollout.run_single_rollout`` 的副本，差异有三：
     新增 ``image_transform`` 参数（在 MuJoCo 相机图像捕获之后、构造策略
     观测之前应用图像变换，视频记录变换后的图像，即策略实际所见）与
     ``artifact_stem_override`` 参数（覆盖视频/动作日志文件名前缀，供
-    同一 scene/task/policy 下多个扰动条件独立落盘，避免互相覆盖）。
-    两个参数为``None``时行为与原模块完全一致。
+    同一 scene/task/policy 下多个扰动条件独立落盘，避免互相覆盖）与
+    ``artifact_subdir_override`` 参数（在视频和动作日志根目录下增加
+    相同的相对子目录，便于按评测参数整理产物）。
+    三个参数为``None``时行为与原模块完全一致。
 
     Args:
         policy: 已加载的LeRobot策略。
@@ -100,6 +104,8 @@ def run_single_rollout(
             在构造策略观测前应用。为``None``时不应用任何变换。
         artifact_stem_override: 可选视频/动作日志文件名前缀覆盖；为``None``
             时使用默认的 ``scene_<seed>_policy_<seed>_<task>_<prompt>``。
+        artifact_subdir_override: 可选视频/动作日志相对子目录；为``None``
+            时保持原有平铺目录结构。禁止绝对路径和父目录跳转。
 
     Returns:
         单条闭环评测结果。
@@ -109,8 +115,15 @@ def run_single_rollout(
     task_text = build_prompt(spec.task_id, spec.prompt_type)
     output_dir.mkdir(parents=True, exist_ok=True)
     artifact_stem = artifact_stem_override or rollout_artifact_stem(spec)
-    video_path = output_dir / "videos" / f"{artifact_stem}.mp4"
-    action_trace_path = output_dir / ACTION_TRACE_DIR / f"{artifact_stem}.jsonl"
+    artifact_subdir = (
+        Path(artifact_subdir_override) if artifact_subdir_override is not None else Path()
+    )
+    if artifact_subdir.is_absolute() or ".." in artifact_subdir.parts:
+        raise ValueError("artifact_subdir_override必须是安全的相对路径")
+    video_path = output_dir / "videos" / artifact_subdir / f"{artifact_stem}.mp4"
+    action_trace_path = (
+        output_dir / ACTION_TRACE_DIR / artifact_subdir / f"{artifact_stem}.jsonl"
+    )
     video_path.parent.mkdir(parents=True, exist_ok=True)
     action_trace_path.parent.mkdir(parents=True, exist_ok=True)
     latencies: list[float] = []

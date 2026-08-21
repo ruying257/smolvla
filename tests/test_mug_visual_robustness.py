@@ -20,6 +20,8 @@ from evaluate.diagnose_mug_visual_robustness import (
     build_image_transform,
     build_summary,
     collapse_threshold,
+    condition_artifact_subdir,
+    format_intensity_component,
     parse_config,
     stable_condition_seed,
     verify_pixel_perturbation,
@@ -181,6 +183,21 @@ class ConfigAndConditionTests(unittest.TestCase):
         self.assertNotEqual(appearance.key, pixel.key)
         self.assertIn("appearance=original", appearance.key)
         self.assertIn("pert=brightness-0.9", pixel.key)
+
+    def test_condition_artifact_subdir_uses_parameter_hierarchy(self) -> None:
+        """外观与像素条件应映射到稳定的参数目录。"""
+        appearance = RobustnessCondition(
+            1, "mug_on_blue", 20260, appearance_variant="green_white"
+        )
+        pixel = RobustnessCondition(
+            1,
+            "mug_on_blue",
+            20260,
+            perturbation=PerturbationSpec("gaussian_noise", 15.0),
+        )
+        self.assertEqual(condition_artifact_subdir(appearance), Path("appearance/green_white"))
+        self.assertEqual(condition_artifact_subdir(pixel), Path("pixel/gaussian_noise/15"))
+        self.assertEqual(format_intensity_component(0.5), "0.5")
 
     def test_stable_condition_seed_is_deterministic(self) -> None:
         """条件派生种子必须确定且随条件变化。"""
@@ -355,6 +372,8 @@ class ThinCopyRolloutIntegrationTests(unittest.TestCase):
             self.assertEqual(calls["count"], 2)
             self.assertEqual(result.failure_mode, "timeout")
             self.assertEqual(result.error, "")
+            self.assertEqual(Path(result.video_path).parent, output / "videos")
+            self.assertEqual(Path(result.action_trace_path).parent, output / "action_traces")
             lines = Path(result.action_trace_path).read_text(encoding="utf-8").splitlines()
             self.assertEqual(len(lines), 2)
             trace = json.loads(lines[0])
@@ -411,6 +430,7 @@ class ThinCopyRolloutIntegrationTests(unittest.TestCase):
                 execution_horizon=1,
                 environment="mug",
                 artifact_stem_override="scene_123_policy_20260_mug_on_blue_canonical__appearance_green_white",
+                artifact_subdir_override="appearance/green_white",
             )
             second = run_single_rollout(
                 FakePolicy(),
@@ -425,11 +445,28 @@ class ThinCopyRolloutIntegrationTests(unittest.TestCase):
                 execution_horizon=1,
                 environment="mug",
                 artifact_stem_override="scene_123_policy_20260_mug_on_blue_canonical__pert_brightness_0.5",
+                artifact_subdir_override="pixel/brightness/0.5",
             )
             self.assertNotEqual(first.video_path, second.video_path)
             self.assertNotEqual(first.action_trace_path, second.action_trace_path)
             self.assertTrue(Path(first.video_path).is_file())
             self.assertTrue(Path(second.video_path).is_file())
+            self.assertEqual(
+                Path(first.video_path).parent.relative_to(output / "videos"),
+                Path("appearance/green_white"),
+            )
+            self.assertEqual(
+                Path(first.action_trace_path).parent.relative_to(output / "action_traces"),
+                Path("appearance/green_white"),
+            )
+            self.assertEqual(
+                Path(second.video_path).parent.relative_to(output / "videos"),
+                Path("pixel/brightness/0.5"),
+            )
+            self.assertEqual(
+                Path(second.action_trace_path).parent.relative_to(output / "action_traces"),
+                Path("pixel/brightness/0.5"),
+            )
 
 
 if __name__ == "__main__":

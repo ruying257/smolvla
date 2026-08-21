@@ -376,8 +376,8 @@ FK只把50步绝对关节命令投影为attachment-site的运动学轨迹，用�
 ```powershell
 conda activate smolvla-eval
 python -m evaluate.diagnose_mug_visual_robustness `
-  --checkpoint outputs\train\smolvla_ur10e_mug_v1_b8_s8000\checkpoints\last\pretrained_model `
-  --config configs\diagnose_mug_robustness.yaml `
+  --checkpoint outputs\train\smolvla_ur10e_mug_v1_b8_s8000\checkpoints\008000\pretrained_model `
+  --config configs\eval\mug_robustness\diagnose_mug_robustness.yaml `
   --output-dir outputs\eval\mug_robustness_010000 `
   --device cuda
 ```
@@ -407,8 +407,12 @@ outputs/eval/mug_robustness_010000/
 ├── summary.json               # 机器可读摘要与崩溃阈值
 ├── report.md                  # 人工可读报告（含失败阶段分布）
 ├── curves/                    # 每个像素扰动维度的成功率-强度曲线PNG
-├── action_traces/
+├── action_traces/              # 与 videos 使用相同的参数目录层级
+│   ├── appearance/<variant>/
+│   └── pixel/<扰动名>/<强度>/
 └── videos/
+    ├── appearance/<variant>/
+    └── pixel/<扰动名>/<强度>/
 ```
 
 崩溃阈值规则：成功率首次跌破 `max(0.5, baseline - 20pp)` 的最低强度档（baseline 为 `original` 无扰动成功率）。同一配置对 baseline 与域随机化训练 checkpoint 各跑一次，可产出对比曲线，支撑"评测发现 → 增强解决 → 复测验证"闭环。
