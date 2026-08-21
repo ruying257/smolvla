@@ -465,8 +465,8 @@ python -m unittest discover -s tests -v
 
 ```powershell
 .\evaluate\run.ps1 `
-  --checkpoint outputs\train\smolvla_ur10e `
-  --config configs\eval_standard.yaml `
+  --checkpoint outputs\train\smolvla_ur10e_mug_v1_b8_s8000\checkpoints\008000\pretrained_model `
+  --config configs\eval\mug_robustness\diagnose_mug_robustness.yaml `
   --output-dir outputs\eval\formal_020000
 ```
 
@@ -474,8 +474,8 @@ python -m unittest discover -s tests -v
 
 ```powershell
 .\evaluate\run.ps1 `
-  --checkpoint outputs\train\smolvla_ur10e `
-  --config configs\eval_standard.yaml `
+  --checkpoint outputs\train\smolvla_ur10e_mug_v1_b8_s8000\checkpoints\008000\pretrained_model `
+  --config configs\eval\mug_robustness\diagnose_mug_robustness.yaml `
   --output-dir outputs\eval\formal_020000 `
   --resume
 ```
