@@ -7,6 +7,7 @@ diagnostic:
   output_dir: outputs/eval/mug_robustness_010000
   fps: 20
   max_steps: 360
+  execution_horizon: 25
   scene_seeds:
     - 2291
     - 6705

@@ -47,10 +47,25 @@ SmolVLA 云端训练与环境检查模块。本目录封装了云端 GPU 环境�
 - `--dataset-root`：LeRobot 数据集目录，默认 `smolvla-data/smolvla_ur10e_grounding_v2`；
 - `--config`：训练 YAML 配置，默认 `configs/cloud_train_Tencent.yaml`；
 - `--output-dir` / `--job-name`：覆盖配置中的输出目录与任务名；
+- `--resume-from`：从已有训练输出的 checkpoint 目录（如 `outputs/train/xxx/checkpoints/last`）恢复训练，使用 `--resume=true` 完整恢复 step、优化器与调度器状态；与 `--smoke` 互斥；
 - `--smoke`：强制 1 step、batch=1 的 smoke 训练；
 - `--dry-run`：仅打印最终 `lerobot-train` 命令，不执行。
 
-`build_train_command()` 读取配置中的 `train` / `policy` / `dataset` 段，拼装 policy 路径、设备、AMP、视频后端、batch_size、steps、save_freq 等参数，并关闭 `push_to_hub`、`eval` 与 `wandb`。训练输出目录已存在时会拒绝覆盖（dry-run 除外）。训练日志写入 `output_dir.parent/<name>.train.log`。
+#### 新训练路径：`build_train_command()`
+
+读取配置中的 `train` / `policy` / `dataset` 段，拼装 policy 路径、设备、AMP、视频后端、batch_size、steps、save_freq 等参数，关闭 `push_to_hub` 与 `eval`，开启 `wandb.enable=true`。训练输出目录已存在时会拒绝覆盖（dry-run 除外）。训练日志写入 `output_dir.parent/<name>.train.log`。
+
+#### 恢复训练路径：`_build_resume_command()`
+
+当 `--resume-from` 非空时走此分支（与 `--smoke` 互斥）。恢复机制：
+
+- 使用 `--resume=true` + `--config_path=<checkpoint>/pretrained_model/train_config.json`；
+- `TrainPipelineConfig.from_pretrained` 从 checkpoint 加载完整训练配置（含策略超参、优化器与调度器段），其余 CLI 参数作为覆盖项；
+- `load_training_state` 恢复 step、优化器、调度器与 RNG 状态。
+
+**调度器衔接注意事项**：调度器会按新总步数重建后再套用已保存状态，若总步数改变其自动缩放会导致恢复点学习率跳升。必须用配置中 `resume` 段的 `scheduler_num_warmup_steps` / `scheduler_num_decay_steps` 复刻原有效调度（如原运行 10000 步配置自动缩放为 warmup 333 / decay 10000），保证学习率平滑衔接。
+
+调用前 `main()` 会校验 `<resume_from>/pretrained_model/train_config.json` 存在，缺失则抛出 `FileNotFoundError`。
 
 ### `smoke_test.py`
 
@@ -87,3 +102,7 @@ python -m cloud.train --smoke
 
 # 4. 端到端 smoke：预检 + 单步训练 + checkpoint 验收
 python -m cloud.smoke_test
+
+# 5. 从已有 checkpoint 恢复训练（与 --smoke 互斥）
+python -m cloud.train --resume-from outputs/train/smolvla_ur10e_grounding_v2/checkpoints/last
+```

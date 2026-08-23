@@ -1,0 +1,29 @@
+# 从 smolvla_ur10e_mug_v1_b8_s8000 的 last checkpoint 恢复训练至累计 15000 步。
+#
+# 机制：cloud/train.py 的 --resume-from 生成 --resume=true + --config_path=<checkpoint>/pretrained_model/train_config.json。
+# LeRobot 0.4.4 从 checkpoint 配置加载完整训练配置并恢复 step=8000、AdamW 优化器状态、
+# 调度器位置与 RNG；训练循环执行 range(8000, steps)，因此 resume 下 steps 为【总步数】。
+#
+# 学习率衔接（关键）：原运行配置 steps=10000 触发 CosineDecayWithWarmup 自动缩放，
+# 实际生效调度为 warmup 333 / decay 10000，第 8000 步 LR 已衰减到 1.18e-5。
+# 若不覆盖调度器，resume 会按新总步数 15000 重新缩放（warmup 500 / decay 15000），
+# 导致 LR 从 1.18e-5 跳升到 ~4.6e-5。下方覆盖复刻原有效调度（15000>10000 不再缩放），
+# LR 从 1.18e-5 平滑衰减到 2.5e-6（第 10000 步）并平坦保持到第 15000 步。
+resume:
+  checkpoint: /workspace/smolvla/outputs/train/smolvla_ur10e_mug_v1_b8_s8000/checkpoints/last
+  scheduler_num_warmup_steps: 333
+  scheduler_num_decay_steps: 10000
+
+dataset:
+  repo_id: smolvla_ur10e_mug_v1
+  video_backend: pyav
+
+train:
+  output_dir: outputs/train/smolvla_ur10e_mug_v1_b8_s15000
+  job_name: smolvla_ur10e_mug_v1_b8_s15000
+  seed: 1000
+  batch_size: 8
+  steps: 15000
+  num_workers: 2
+  log_freq: 20
+  save_freq: 2000

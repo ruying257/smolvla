@@ -8,19 +8,14 @@
 | --- | --- | --- |
 | `rollout.py` | 积木/杯子标准闭环评测、恢复、汇总和视频管理 | 是 |
 | `rollout_robustness.py` | 视觉鲁棒性专用 rollout，支持图像变换和按参数整理产物 | 是 |
-| `diagnose_language.py` | 检查颜色词经过真实 preprocessor 后的 Token 差异 | 否 |
-| `diagnose_conditioning.py` | 检查语言差异是否传播到 VLM 特征和 Action Chunk | 否 |
-| `diagnose_visual_counterfactual.py` | 用位置交换/颜色中性化检查视觉—语言空间绑定 | 否 |
 | `diagnose_mug_visual_robustness.py` | 杯子外观和全图像素扰动下的闭环成功率评测 | 是 |
-| `common.py` | 配置、路径、checkpoint 和 JSON 公共工具 | — |
+| `common.py` | 配置、路径、checkpoint、JSON 与 Pillow 折线图公共工具 | — |
 | `run.ps1` | 检查 Conda 环境后启动 `python -m evaluate` | — |
 
 推荐流程：
 
 ```text
 标准闭环评测
-  ├─ 语言异常 → Token诊断 → 条件传播诊断
-  ├─ 目标选择异常 → 视觉反事实诊断
   └─ 换皮/成像异常 → Mug视觉鲁棒性评测
 ```
 
@@ -183,45 +178,7 @@ configs/eval/motion_limiter/mug_v1_seen_h25.yaml
 
 ## 4. 专项诊断
 
-### 4.1 语言 Token 诊断
-
-固定零图像和零状态，只加载真实 preprocessor，检查红绿与蓝黄文本是否被正确分词：
-
-```powershell
-python -m evaluate.diagnose_language `
-  --checkpoint outputs\train\smolvla_ur10e_b8_s15000_r2\checkpoints\010000\pretrained_model `
-  --output-dir outputs\eval\diagnostics\language_tokens_010000
-```
-
-通过只能排除 Tokenizer/preprocessor 合并颜色词，不能证明模型实际使用了颜色信息。
-
-### 4.2 条件传播诊断
-
-固定 scene 图像、状态和 `(1, 50, 32)` Flow Matching 噪声，检查语言差异是否传播到 VLM 特征、prefix KV cache 和 Action Chunk：
-
-```powershell
-python -m evaluate.diagnose_conditioning `
-  --checkpoint outputs\train\smolvla_ur10e_b8_s15000_r2\checkpoints\010000\pretrained_model `
-  --config configs\diagnose_conditioning.yaml `
-  --output-dir outputs\eval\diagnostics\conditioning_010000
-```
-
-冒烟可增加 `--max-scenes 1 --prompt-types canonical`。该工具不推进 MuJoCo，不代表闭环成功率。
-
-### 4.3 视觉反事实诊断
-
-固定机器人状态和采样噪声，比较 `original`、`swap_positions`、`neutralize_red`、`neutralize_green`，定位视觉编码、跨模态绑定、动作专家或空间方向映射的最早异常环节：
-
-```powershell
-python -m evaluate.diagnose_visual_counterfactual `
-  --checkpoint outputs\train\smolvla_ur10e_b8_s15000_r2\checkpoints\010000\pretrained_model `
-  --config configs\diagnose_visual_counterfactual.yaml `
-  --output-dir outputs\eval\diagnostics\visual_counterfactual_010000
-```
-
-正式矩阵为 `6 scene × 2 instruction × 4 variant = 48` 个条件，并包含 original 重复控制。`--max-scenes 1` 只用于链路冒烟；特征或 Action Chunk 差异不能单独证明抓取成功。
-
-### 4.4 Mug 视觉鲁棒性评测
+### 4.1 Mug 视觉鲁棒性评测
 
 该工具固定 `scene_seed × task × canonical × policy_seed=20260`，只改变视觉条件：
 

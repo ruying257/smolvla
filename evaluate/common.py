@@ -287,3 +287,55 @@ def write_json(path: Path, value: Any) -> None:
     """以稳定 UTF-8 格式写入 JSON。"""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def write_pillow_line_plot(
+    path: Path,
+    values: np.ndarray,
+    title: str,
+    marker_index: int | None,
+) -> None:
+    """在无 Matplotlib 环境中用 Pillow 生成可读折线图。
+
+    Args:
+        path: PNG 输出路径。
+        values: 一维有限数值序列。
+        title: 图标题。
+        marker_index: 可选的竖线索引，例如前 10 步边界使用 9。
+    """
+    from PIL import Image, ImageDraw
+
+    sequence = np.asarray(values, dtype=np.float64).reshape(-1)
+    if sequence.size == 0 or not np.isfinite(sequence).all():
+        raise ValueError("Pillow 折线图需要非空有限数值")
+    width, height = 1000, 500
+    left, right, top, bottom = 85, 35, 65, 65
+    image = Image.new("RGB", (width, height), "white")
+    draw = ImageDraw.Draw(image)
+    draw.text((left, 20), title, fill="black")
+    draw.line((left, top, left, height - bottom), fill="black", width=2)
+    draw.line((left, height - bottom, width - right, height - bottom), fill="black", width=2)
+    lower = float(np.min(sequence))
+    upper = float(np.max(sequence))
+    span = upper - lower if upper > lower else 1.0
+    x_span = width - left - right
+    y_span = height - top - bottom
+    points = []
+    for index, value in enumerate(sequence):
+        ratio = index / max(1, sequence.size - 1)
+        x = left + int(round(ratio * x_span))
+        y = height - bottom - int(round((float(value) - lower) / span * y_span))
+        points.append((x, y))
+    if len(points) > 1:
+        draw.line(points, fill=(31, 119, 180), width=3)
+    else:
+        x, y = points[0]
+        draw.ellipse((x - 3, y - 3, x + 3, y + 3), fill=(31, 119, 180))
+    if marker_index is not None and 0 <= marker_index < sequence.size:
+        marker_x = points[marker_index][0]
+        draw.line((marker_x, top, marker_x, height - bottom), fill=(214, 39, 40), width=2)
+    draw.text((10, top), f"max={upper:.5g}", fill="black")
+    draw.text((10, height - bottom - 12), f"min={lower:.5g}", fill="black")
+    draw.text((left, height - bottom + 20), "1", fill="black")
+    draw.text((width - right - 30, height - bottom + 20), str(sequence.size), fill="black")
+    image.save(path, format="PNG")

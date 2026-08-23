@@ -11,5 +11,5 @@ datasets/
 smolvla-data/
 *.mp4
 *.zip
-
-
+*/legacy/
+*/*/legacy/
