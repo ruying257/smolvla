@@ -1,54 +1,53 @@
-# SmolVLA 本机模型效果评测
+# SmolVLA 本机评测与诊断
 
-本文档定义 SmolVLA 在本笔记本 `smolvla-eval` Conda环境中的MuJoCo闭环评测框架。正式结论来自固定实验矩阵上的重复闭环成功率，而不是训练loss、单个视频或单次随机rollout。
+本目录提供 SmolVLA 在 MuJoCo 中的标准闭环评测、失败归因和视觉鲁棒性评测。正式结论应来自固定实验矩阵上的重复闭环成功率，不能用训练 loss、单条视频或静态特征差异代替。
 
-## 1. Scene seed与固定policy seed
+## 1. 工具结构
 
-评测包含两个相互独立的随机来源：
+| 文件 | 作用 | 是否推进物理 |
+| --- | --- | --- |
+| `rollout.py` | 积木/杯子标准闭环评测、恢复、汇总和视频管理 | 是 |
+| `rollout_robustness.py` | 视觉鲁棒性专用 rollout，支持图像变换和按参数整理产物 | 是 |
+| `diagnose_language.py` | 检查颜色词经过真实 preprocessor 后的 Token 差异 | 否 |
+| `diagnose_conditioning.py` | 检查语言差异是否传播到 VLM 特征和 Action Chunk | 否 |
+| `diagnose_visual_counterfactual.py` | 用位置交换/颜色中性化检查视觉—语言空间绑定 | 否 |
+| `diagnose_mug_visual_robustness.py` | 杯子外观和全图像素扰动下的闭环成功率评测 | 是 |
+| `common.py` | 配置、路径、checkpoint 和 JSON 公共工具 | — |
+| `run.ps1` | 检查 Conda 环境后启动 `python -m evaluate` | — |
 
-- `scene_seed`：控制两个积木的初始位置；同一seed复现相同场景。
-- `policy_seed`：控制SmolVLA Flow Matching生成Action Chunk时的采样噪声。
-
-本轮不把policy seed作为模型效果的主要实验变量，所有配置统一固定为`20260`，仅用于复现Flow Matching采样。模型效果主要通过不同`scene_seed`、任务和措辞进行比较；结果中仍记录policy seed，便于追溯。
-
-## 2. 正式实验矩阵
-
-`configs/eval_standard.yaml`锁定：
+推荐流程：
 
 ```text
-10个未见scene seed（10000-10009）
-× 4类任务
-× 3种措辞
-× 1个固定policy seed（20260）
-= 120条rollout
+标准闭环评测
+  ├─ 语言异常 → Token诊断 → 条件传播诊断
+  ├─ 目标选择异常 → 视觉反事实诊断
+  └─ 换皮/成像异常 → Mug视觉鲁棒性评测
 ```
 
-三种措辞为：
+## 2. 环境与入口
 
-| 类型 | 示例 | 训练状态 |
-| --- | --- | --- |
-| `canonical` | Put the red cube on the blue pad. | 已见 |
-| `synonym` | Place the red cube onto the blue pad. | 已见 |
-| `unseen` | Move the red cube to the blue pad. | 未见 |
-
-训练数据使用的scene seed为`0-9`与`100-139`，正式测试使用`10000-10009`，不存在布局seed重合。专家示范最长351步，因此正式超时锁定为400步，即20 Hz下20秒，并提供约14%余量。
-
-严格成功必须满足：指定积木完整进入目标区域内缩5 mm后的范围、连续稳定0.5秒且夹爪已经释放。
-
-## 3. 环境与checkpoint
-
-已验证环境为Windows、Python 3.11、PyTorch 2.7.0+cu126、LeRobot 0.4.4、MuJoCo 3.6.0和GTX 1650。评测不使用云端`.venv-cloud`或EGL。
+已验证环境：Windows、Python 3.11、PyTorch 2.7.0+cu126、LeRobot 0.4.4、MuJoCo 3.6.0、GTX 1650。
 
 ```powershell
 cd F:\桌面\smolvla
 conda activate smolvla-eval
-python -c "import torch; print(torch.__version__); print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0))"
-python view_scene.py --headless --steps 10 --scene-seed 10000
+python -c "import torch; print(torch.__version__); print(torch.cuda.is_available())"
 ```
 
-统一入口默认启用Hugging Face离线模式。本机缓存必须包含checkpoint引用的`HuggingFaceTB/SmolVLM2-500M-Video-Instruct`配置、处理器与权重。
+标准评测有两个等价入口：
 
-checkpoint至少包含：
+```powershell
+python -m evaluate --help
+.\evaluate\run.ps1 --help
+```
+
+入口默认启用 Hugging Face 离线模式。checkpoint 可以传训练输出根目录，也可以传具体的 `pretrained_model`：
+
+- 训练输出根目录：自动选择 `checkpoints\last\pretrained_model`；
+- 具体 checkpoint：严格使用指定步数，不自动切换；
+- 不同步数或配置必须使用不同输出目录。
+
+checkpoint 至少包含：
 
 ```text
 pretrained_model/
@@ -58,356 +57,248 @@ pretrained_model/
 └── policy_postprocessor.json
 ```
 
-## 3.1 Seen场景对照实验
+开发或修改评测逻辑后运行：
 
-`configs/eval_seen.yaml`用于验证新训练模型在训练已见布局中的效果：
-
-```text
-6个训练已见scene seed（0-5）
-× 4类任务
-× 1种训练已见canonical措辞
-× 1个policy seed（20260）
-= 24条rollout
+```powershell
+python -m unittest discover -s tests -v
 ```
 
-这6个scene seed在四类任务的训练示范中都出现过。除场景集合、措辞范围和只采用`policy_seed=20260`外，评测仍使用与正式实验相同的checkpoint、20 Hz、400步超时和成功条件。执行命令：
+## 3. 标准闭环评测
+
+### 3.1 固定随机性与成功口径
+
+- `scene_seed`：控制物体初始布局；
+- `policy_seed`：控制 Flow Matching 的 Action Chunk 采样噪声；
+- 当前正式配置统一固定 `policy_seed=20260`，主要比较 scene、task、prompt 或视觉条件；
+- 评测频率为 20 Hz，积木默认最多 400 步，杯子配置最多 360 步。
+
+严格成功要求目标物体完整进入目标区域、连续稳定 0.5 秒且夹爪已释放。杯子任务还要求杯子保持直立，并使用目标区内缩边界。
+
+### 3.2 现有评测矩阵
+
+| 配置 | 矩阵 | 用途 |
+| --- | ---: | --- |
+| `configs/eval_standard.yaml` | 10 未见 scene × 4 task × 3 prompt = 120 | 积木正式泛化评测 |
+| `configs/eval_seen.yaml` | 6 已见 scene × 4 task = 24 | 积木已见布局对照 |
+| `configs/eval/mug_v1.yaml` | 20 已见 scene × 2 task = 40 | 杯子 seen 评测 |
+| `configs/eval/mug_v1_unseen.yaml` | 20 未见 scene × 2 task = 40 | 杯子 unseen 评测 |
+| `configs/eval/mug_v1_seen_green.yaml` | 6 已见 scene × 2 task = 12 | 绿白杯探索 |
+| `configs/eval/mug_v1_seen_green_2seeds.yaml` | 2 已见 scene × 2 task = 4 | 绿白杯冒烟 |
+| `configs/eval/motion_limiter/*.yaml` | 20 已见 scene × 2 task = 40/组 | h25 限制器对照 |
+
+积木三种 prompt：
+
+| 类型 | 示例 | 训练状态 |
+| --- | --- | --- |
+| `canonical` | Put the red cube on the blue pad. | 已见 |
+| `synonym` | Place the red cube onto the blue pad. | 已见 |
+| `unseen` | Move the red cube to the blue pad. | 未见 |
+
+杯子目前只支持 `canonical`，任务为 `mug_on_blue` 和 `mug_on_yellow`。
+
+### 3.3 冒烟与正式运行
+
+先用独立输出目录执行短冒烟，只验证模型加载、CUDA、场景、视频和日志链路：
 
 ```powershell
 .\evaluate\run.ps1 `
-  --checkpoint outputs\train\smolvla_ur10e_data_v2 `
-  --config configs\eval_seen.yaml `
-  --output-dir outputs\eval\train_3_seen_canonical_h20 `
-  --execution-horizon 20
-```
-
-中断后在同一命令末尾增加`--resume`。分析时只能将seen实验与正式120条结果中的`prompt_type=canonical`子集比较，不能把24条seen结果与包含三种措辞的总体成功率直接相减。该对照用于描述已见布局与未见布局的性能差距，不等同于独立测试集上的泛化结论。
-
-### 3.2 mug_v1杯子模型评测
-
-`smolvla_ur10e_mug_v1_b8_s8000`是使用杯子数据集训练的独立模型，不能套用积木的`eval_seen.yaml`。杯子评测入口会根据配置切换到`MugTabletopEnv`，任务只有：
-
-```text
-20个训练共享scene seed（来自configs/mug_v3_seed_selection.json）
-× 2个任务（mug_on_blue、mug_on_yellow）
-× 1种训练时canonical措辞
-× 1个policy seed（20260）
-= 40条闭环rollout
-```
-
-当前训练输出目录下存在`002000`、`004000`、`006000`、`008000`和`last`。`last`的`training_step.json`记录为8000步，因此本次输出尚未产生10000步checkpoint；目录名中的`s10000`是训练计划名，不代表实际已保存到10000步。
-
-checkpoint参数的选择逻辑如下：
-
-- 传训练输出根目录（例如`outputs\train\smolvla_ur10e_mug_v1_b8_s8000`）时，评测器自动选择`checkpoints\last\pretrained_model`，适合评测最新已保存版本；
-- 传具体checkpoint目录（例如`...\checkpoints\008000\pretrained_model`）时，严格评测该步，不会自动改成`last`；
-- 正式对比不同训练步时，必须为每个步数使用不同输出目录，避免manifest身份和结果互相覆盖。
-
-先执行1条、2步的CUDA冒烟，确认杯子场景、模型加载和视频输出：
-
-```powershell
-conda activate smolvla-eval
-python -m evaluate `
-  --checkpoint outputs\train\smolvla_ur10e_mug_v1_b8_s8000\checkpoints\last\pretrained_model `
+  --checkpoint outputs\train\smolvla_ur10e_mug_v1_b8_s8000\checkpoints\008000\pretrained_model `
   --config configs\eval\mug_v1.yaml `
   --output-dir outputs\eval\mug_v1_smoke `
   --max-rollouts 1 `
-  --max-steps 2 `
-  --keep-all-videos
+  --max-steps 2
 ```
 
-冒烟通过后运行40条正式seen评测：
-
-```powershell
-conda activate smolvla-eval
-.\evaluate\run.ps1 `
-  --checkpoint outputs\train\smolvla_ur10e_mug_v1_b8_s8000\checkpoints\last\pretrained_model `
-  --config configs\eval\mug_v1.yaml `
-  --output-dir outputs\eval\mug_v1_seen_canonical
-```
-
-首次运行不要加`--resume`；中断后必须使用完全相同的checkpoint、配置和输出目录，再追加`--resume`续跑。
-
-若只想复核一个指定的杯子布局，可增加`--scene-seed`。该参数只收缩场景维度，仍会执行配置中该场景对应的全部任务、措辞和policy seed；因此`mug_v1.yaml`下一个scene会生成blue、yellow两条轨迹。单场景复核必须使用新的输出目录，不能向完整40条正式结果目录续跑：
+冒烟通过后运行完整矩阵：
 
 ```powershell
 .\evaluate\run.ps1 `
   --checkpoint outputs\train\smolvla_ur10e_mug_v1_b8_s8000\checkpoints\008000\pretrained_model `
   --config configs\eval\mug_v1.yaml `
-  --scene-seed 8669 `
-  --execution-horizon 20 `
-  --output-dir outputs\eval\mug_v1_step8000_scene8669_h20
+  --output-dir outputs\eval\mug_v1_s8000_seen_canonical
 ```
 
-### 3.3 覆盖更新已有失败rollout
+只复核一个 scene 时使用 `--scene-seed`；它保留该 scene 下配置中的全部任务、措辞和 policy seed，并应使用新输出目录。
 
-当成功判据修订后需要复核旧失败项时，使用`--rerun-failures`。它读取已有`rollouts.jsonl`，仅重跑全部`success=false`的实验键，保留原成功行，并覆盖失败项的视频、动作轨迹、CSV、汇总与报告。该模式不能与`--resume`、`--scene-seed`或`--max-rollouts`组合；首次更新也不加`--resume`：
+### 3.4 恢复与失败重跑
+
+标准评测首次运行不加 `--resume`。中断后使用完全相同的 checkpoint、配置、参数和输出目录：
 
 ```powershell
-conda activate smolvla-eval
+.\evaluate\run.ps1 `
+  --checkpoint <与首次相同> `
+  --config <与首次相同> `
+  --output-dir <与首次相同> `
+  --resume
+```
+
+`--resume` 会校验 manifest、checkpoint SHA-256、源码、配置、环境、实验键和视频策略；合法结果会跳过，`control_exception` 或带 `error` 的轨迹会重跑。
+
+成功判据修订后，可只覆盖已有失败项：
+
+```powershell
 .\evaluate\run.ps1 `
   --checkpoint outputs\train\smolvla_ur10e_mug_v1_b8_s8000\checkpoints\008000\pretrained_model `
   --config configs\eval\mug_v1.yaml `
-  --output-dir outputs\eval\mug_v1_s8000_h20_seen_canonical `
-  --execution-horizon 20 `
+  --output-dir outputs\eval\mug_v1_s8000_seen_canonical `
   --rerun-failures
 ```
 
-命令要求旧结果实验键和checkpoint哈希与当前输入一致；若旧目录有manifest，还会校验checkpoint、配置、环境和execution horizon。旧目录缺少manifest时可显式更新，但会在`rollout_update.json`和`report.md`中标记。该汇总混合了旧成功轨迹与新重跑失败轨迹，适合数据更新与诊断，不应替代全量同版本重跑的正式结果。
+`--rerun-failures` 不能与 `--resume`、`--scene-seed` 或 `--max-rollouts` 组合。该模式混合旧成功轨迹与新失败重跑，适合修订结果，不代替全量同版本复跑。
 
-若要固定比较8000步模型，改用：
+### 3.5 动作执行选项
 
-```powershell
-.\evaluate\run.ps1 `
-  --checkpoint outputs\train\smolvla_ur10e_mug_v1_b8_s8000\checkpoints\008000\pretrained_model `
-  --config configs\eval_mug_v1.yaml `
-  --output-dir outputs\eval\mug_v1_step8000_canonical
+#### Execution horizon
+
+`--execution-horizon K` 表示每次仍预测完整 Action Chunk，但只执行前 K 步后根据最新观测重规划。它属于 manifest 身份，改变时必须使用新输出目录；K 越小，闭环反馈更频繁，推理开销也越高。
+
+#### Chunk blend
+
+`--chunk-blend K` 使用旧 chunk 尾帧作为锚点，对新 chunk 前 K 帧做角度回卷后的线性插值；夹爪维度保持透传。`K=0` 为关闭，建议从 2–4 开始。
+
+008000 杯子 checkpoint、h25、40 条/组的现有对照：
+
+| K | 成功率 | exec jump ratio | 边界方向翻转率 |
+| ---: | ---: | ---: | ---: |
+| 0 | 77.5% | 1.39 | 0.111 |
+| 2 | 80.0% | 0.92 | 0.000 |
+| 4 | 85.0% | 0.54 | 0.000 |
+
+K=4 显著降低边界抖动；成功率区间仍有重叠，不应解读为已证明统计显著提升。
+
+#### Motion limiter
+
+限制器只作用于六个关节的评测执行动作，不修改模型、训练数据或夹爪指令。现有对照配置：
+
+```text
+configs/eval/motion_limiter/mug_v1_seen_h25_baseline.yaml
+configs/eval/motion_limiter/mug_v1_seen_h25.yaml
 ```
 
-杯子任务仍使用400步（20秒）超时和严格成功条件：杯子中心进入目标区内缩1厘米边界、保持直立稳定0.5秒并释放夹爪。结果目录中的`rollouts.csv`、`summary.json`、`report.md`、`action_traces/`和视频分别用于统计、失败分类、动作裁剪和人工复核；它们只代表本机MuJoCo杯子场景，不外推为真实机器人成功率。
+逐步日志会同时记录模型输出、反归一化动作、范围裁剪动作、最终执行动作、参考速度和真实关节状态。
 
-### 3.2.1 h20关节速度/加速度限制器对照
+### 3.6 视频保留策略
 
-限制器只作用于评测执行时的六个关节绝对目标，不修改训练数据、模型权重或夹爪指令。先从完整杯子专家数据生成锁定的`p99 × 1.1`限制文件：
+当前默认保留全部视频。只有显式增加 `--prune-videos`，才会保留全部失败视频及每个 `task_id × prompt_type` 的首条成功视频。视频策略属于 manifest 身份，续跑时不能改变。
 
-```powershell
-conda activate smolvla-eval
-python scripts\calibrate_motion_limits.py `
-  --dataset-root smolvla-data\smolvla_ur10e_mug_v1 `
-  --output configs\motion_limits\mug_v1_p99x1.1.json
-```
+## 4. 专项诊断
 
-随后使用相同的20个seen scene、两个任务、固定policy seed和`execution_horizon=20`分别运行基线与限制器；两个输出目录不得混用或覆盖：
+### 4.1 语言 Token 诊断
+
+固定零图像和零状态，只加载真实 preprocessor，检查红绿与蓝黄文本是否被正确分词：
 
 ```powershell
-.\evaluate\run.ps1 `
-  --checkpoint outputs\train\smolvla_ur10e_mug_v1_b8_s8000\checkpoints\008000\pretrained_model `
-  --config configs\eval\mug_v1_seen_h20_baseline.yaml
-
-.\evaluate\run.ps1 `
-  --checkpoint outputs\train\smolvla_ur10e_mug_v1_b8_s8000\checkpoints\008000\pretrained_model `
-  --config configs\eval\mug_v1_seen_h20_motion_limiter.yaml
-```
-
-每条动作日志会记录范围裁剪后动作、限制器最终执行动作、参考速度，以及物理推进后的实际关节位置/速度和末端位置。结果目录新增`motion_metrics_by_rollout.csv`、`motion_metrics_summary.json`与`motion_metrics_report.md`；正式比较以逐轨迹中位数和scene-bootstrap区间为准，不应只比较单条视频。
-
-### 3.2.2 chunk 衔接平滑（--chunk-blend）
-
-SmolVLA 按 `chunk_size`（50）预测动作 chunk 并逐帧执行，队列耗尽时重新预测。重预测时新 chunk 的起点与旧 chunk 尾部在输出空间不连续，会造成周期性方向突变/抖动（`outputs/eval/chunk_boundary_analysis/report.md` 分析：边界模型输出跳变是 chunk 内部的 1.3–2.1 倍，且失败轨迹边界跳变显著更大）。
-
-`--chunk-blend K` 在**模型输出层**对重预测边界做衔接平滑：每次重预测时用旧 chunk 的尾帧作锚点，对新 chunk 前 K 帧做带角度回卷的线性插值，使衔接连续。两个保护：
-
-- **角度回卷**：前 6 个关节角是循环量，插值前把角度差回卷到 `[-pi, pi)`，避免跨 ±π 时多转一整圈；
-- **夹爪保护**：第 7 维夹爪是离散语义（开/合），不参与插值，直接透传新 chunk 值，避免产生"半开半合"的无意义中间夹持力。
-
-`K=0`（默认）时完全退化为直接透传，行为等同未启用。K 建议取 2–4（数据中边界跳变集中在边界首帧，K 过大反而拖慢动作并偏离模型意图）。该参数属于 manifest 身份，改变时必须使用新输出目录：
-
-```powershell
-.\evaluate\run.ps1 `
-  --checkpoint outputs\train\smolvla_ur10e_mug_v1_b8_s8000\checkpoints\008000\pretrained_model `
-  --config configs\eval\mug_v1.yaml `
-  --output-dir outputs\eval\mug_v1_s8000_h25_seen_canonical_blend4 `
-  --execution-horizon 25 `
-  --chunk-blend 4
-```
-
-实现位于 `evaluate/rollout.py` 的 `ChunkBlendPolicy`，通过标准 `predict_action_chunk` 接口预测整段 chunk 并自行管理动作队列，因此对其他 chunking 策略（ACT 等）同样适用，且不依赖 SmolVLA 私有队列结构。每条动作日志会额外记录 `chunk_blend` 字段，便于用 `scripts/analyze_chunk_boundary_jitter.py` 对比边界方向翻转率是否回落。
-
-#### 对照实验结果（008000 checkpoint，mug seen canonical，h25，40 条/组）
-
-产物：`outputs/eval/chunk_blend/`（K0/K2/K4 子目录 + `analysis/` + `summary_comparison.csv` + `report.md`）。
-
-| K | 成功率 (n=40) | Bootstrap 95% CI | 完成步数中位数 | exec_jump_ratio | model_jump_ratio | dir_cos_ratio | 边界方向翻转率 |
-| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: |
-| 0 | 77.5% | [0.625, 0.900] | 270 | 1.39 | 1.76 | 0.70 | 0.111 |
-| 2 | 80.0% | [0.650, 0.925] | 270 | 0.92 | 0.99 | 0.97 | 0.000 |
-| 4 | 85.0% | [0.725, 0.950] | 267 | 0.54 | 0.58 | 1.05 | 0.000 |
-
-**结论**：
-- 边界抖动被显著消除：`exec_jump_ratio`/`model_jump_ratio` 从 >1（边界跳变大于内部）随 K 增大回落到 <1；`dir_cos_ratio` 从 0.70 回升到 ≈1（边界方向连续性恢复）；**边界方向翻转率从 0.11 降为 0**。
-- 成功率不降反升（77.5% → 85%），但 Bootstrap CI 与 K0 有重叠，提升未达统计显著；完成步数中位数基本不变（270→267），说明 K=4 未拖慢动作。
-- 综合建议：`--chunk-blend 4` 在 h25 下能稳定消除边界抖动且无成功率/步数代价；若更保守可先用 K=2。
-
-### 3.3 Execution horizon=10诊断实验
-
-SmolVLA checkpoint保持`chunk_size=50`。增加`--execution-horizon 10`后，每次仍生成50步动作，但只执行前10步，随后使用最新图像和状态重新生成chunk。该模式属于Receding Horizon，不对重叠chunk求平均，也不是RTC。
-
-不能向旧的50步run续跑，因为execution horizon属于manifest身份。请使用新输出目录：
-
-```powershell
-conda activate smolvla-eval
-.\evaluate\run.ps1 `
-  --checkpoint outputs\train\smolvla_ur10e_b8_s15000_r2 `
-  --config configs\eval_seen.yaml `
-  --output-dir outputs\eval\train_2_seen_canonical_h6 `
-  --execution-horizon 6
-```
-
-建议与原`seen_canonical`结果成对比较成功率、抓取阶段轨迹、推理耗时和动作裁剪率。horizon=10会把模型推理频率提高约5倍，因此不能只比较成功率而忽略计算开销。
-
-### 3.3 红绿积木语言Token诊断
-
-当红绿任务产生近似轨迹时，先用checkpoint真实preprocessor排除任务文本、换行、Tokenizer、padding和attention mask问题。该诊断固定相同零图像与七维零状态，覆盖`2种积木颜色 × 2种底板颜色 × 3种措辞 = 12条`，只在CPU加载预处理器，不加载策略权重、不运行MuJoCo控制：
-
-```powershell
-conda activate smolvla-eval
 python -m evaluate.diagnose_language `
   --checkpoint outputs\train\smolvla_ur10e_b8_s15000_r2\checkpoints\010000\pretrained_model `
   --output-dir outputs\eval\diagnostics\language_tokens_010000
 ```
 
-输出包含：
+通过只能排除 Tokenizer/preprocessor 合并颜色词，不能证明模型实际使用了颜色信息。
 
-```text
-language_tokens_010000/
-├── run_manifest.json          # checkpoint、preprocessor哈希、Tokenizer和依赖版本
-├── token_records.jsonl        # 12条文本的原始、换行、完整及有效Token记录
-├── pairwise_comparison.csv    # 6组红绿和6组蓝黄控制配对
-├── summary.json               # 机器可读判定及后续分流
-└── report.md                  # 人工可读Token与差异位置表
-```
+### 4.2 条件传播诊断
 
-通过条件为：所有红绿与蓝黄配对的attention mask相同、均无截断、完整preprocessor与直接Tokenizer结果一致，并且每对只在一个有效颜色Token位置发生预期差异。通过只能排除语言输入处理阶段把颜色合并，不能证明冻结VLM或动作专家实际使用颜色信息；下一步应固定图像、状态和Flow Matching噪声，比较VLM语言特征与action chunk。
-
-### 3.4 固定条件的VLM特征与Action Chunk诊断
-
-Token诊断通过后，使用`configs/diagnose_conditioning.yaml`检查红绿语言差异是否继续传到冻结VLM和动作专家。实验覆盖6个训练已见场景、4类任务和3种措辞，共72个条件。每个条件使用完全相同的输入重复推理一次，因此共产生144个action chunk。
-
-每个场景只执行一次`reset`，不推进MuJoCo物理。场景内所有任务严格复用两路图像和七维状态；全部条件严格复用由唯一`policy_seed=20260`生成的`(1, 50, 32)` Flow Matching噪声。该实验不是第二组policy seed对照，重复推理只用于确认数值确定性。
+固定 scene 图像、状态和 `(1, 50, 32)` Flow Matching 噪声，检查语言差异是否传播到 VLM 特征、prefix KV cache 和 Action Chunk：
 
 ```powershell
-conda activate smolvla-eval
 python -m evaluate.diagnose_conditioning `
   --checkpoint outputs\train\smolvla_ur10e_b8_s15000_r2\checkpoints\010000\pretrained_model `
   --config configs\diagnose_conditioning.yaml `
   --output-dir outputs\eval\diagnostics\conditioning_010000
 ```
 
-先做单场景、canonical真实模型冒烟时使用新输出目录：
+冒烟可增加 `--max-scenes 1 --prompt-types canonical`。该工具不推进 MuJoCo，不代表闭环成功率。
+
+### 4.3 视觉反事实诊断
+
+固定机器人状态和采样噪声，比较 `original`、`swap_positions`、`neutralize_red`、`neutralize_green`，定位视觉编码、跨模态绑定、动作专家或空间方向映射的最早异常环节：
 
 ```powershell
-conda activate smolvla-eval
-python -m evaluate.diagnose_conditioning `
-  --checkpoint outputs\train\smolvla_ur10e_b8_s15000_r2\checkpoints\010000\pretrained_model `
-  --config configs\diagnose_conditioning.yaml `
-  --output-dir outputs\eval\diagnostics\conditioning_010000_smoke `
-  --max-scenes 1 `
-  --prompt-types canonical
-```
-
-诊断链路为：
-
-```text
-颜色Token embedding
-→ VLM最终上下文化语言特征
-→ 动作专家实际使用的16层prefix KV cache
-→ 归一化50×7 action chunk
-→ 反归一化物理动作
-→ 限位裁剪动作
-```
-
-主要产物包括`run_manifest.json`、`fixed_noise.npy`、`fixed_inputs/`、`condition_records.jsonl`、`language_features.npz`、`action_chunks.npz`、两类比较CSV、`summary.json`、`report.md`和两张差异曲线。`action_comparison.csv`同时报告前10步和完整50步，并用蓝黄目标颜色差异作为红绿源颜色差异的控制组。
-
-结果按传播阶段定位：VLM特征不同而动作接近底噪，说明动作专家可能没有有效使用语言条件；物理动作不同但裁剪后趋同，说明执行限位抹除了部分条件差异；红绿差异明显弱于蓝黄差异，说明模型可能更依赖目标底板。上述结果都只证明模型对文本变化的敏感程度，不能证明它正确定位或抓取了相应颜色积木；空间正确性仍需结合物体位置和闭环轨迹验证。
-
-### 3.5 视觉反事实因果诊断
-
-当固定图像诊断表明红绿语言特征能够传播，但闭环仍无法选择正确积木时，使用`configs/diagnose_visual_counterfactual.yaml`直接改变积木视觉条件。实验固定机器人状态、Flow Matching噪声、blue目标、canonical措辞和`policy_seed=20260`，不推进MuJoCo动力学，也不修改正式rollout。
-
-四种视觉版本为：
-
-- `original`：原始红绿积木位置与颜色；
-- `swap_positions`：交换两个free joint的完整七维qpos，颜色随积木移动；
-- `neutralize_red`：红块保持位置和几何，只把RGBA改成中性灰；
-- `neutralize_green`：绿块保持位置和几何，只把RGBA改成中性灰。
-
-正式实验包含`6 scenes × 2 instructions × 4 variants = 48`个条件，并对每个scene的两条original条件各做一次完全相同的重复推理，共60个Action Chunk：
-
-```powershell
-conda activate smolvla-eval
 python -m evaluate.diagnose_visual_counterfactual `
   --checkpoint outputs\train\smolvla_ur10e_b8_s15000_r2\checkpoints\010000\pretrained_model `
   --config configs\diagnose_visual_counterfactual.yaml `
   --output-dir outputs\eval\diagnostics\visual_counterfactual_010000
 ```
 
-GTX 1650真实冒烟只运行第一个scene，即8个条件和2个重复控制：
+正式矩阵为 `6 scene × 2 instruction × 4 variant = 48` 个条件，并包含 original 重复控制。`--max-scenes 1` 只用于链路冒烟；特征或 Action Chunk 差异不能单独证明抓取成功。
+
+### 4.4 Mug 视觉鲁棒性评测
+
+该工具固定 `scene_seed × task × canonical × policy_seed=20260`，只改变视觉条件：
+
+- 环境级外观：`original`、`green_white`、`changed`；
+- 全图像素扰动：亮度、对比度、Gamma、高斯噪声、高斯模糊、JPEG；
+- 两路相机同时扰动，视频记录策略实际看到的扰动后图像；
+- 当前不包含 Mug ROI 或 pad ROI 遮挡。
+
+默认配置为 `5 scene × 2 task × (3 外观 + 18 像素档) = 210` 条，即每个视觉条件 10 条。扩为 20 个 scene 后是 840 条，即每条件 40 条。
+
+当前应显式传入实际配置路径：
 
 ```powershell
-conda activate smolvla-eval
-python -m evaluate.diagnose_visual_counterfactual `
-  --checkpoint outputs\train\smolvla_ur10e_b8_s15000_r2\checkpoints\010000\pretrained_model `
-  --config configs\diagnose_visual_counterfactual.yaml `
-  --output-dir outputs\eval\diagnostics\visual_counterfactual_010000_smoke `
-  --max-scenes 1
-```
-
-单场景冒烟的统计标签为`insufficient_scenes`，只验收CUDA、特征截取、确定性重复和产物写出；因果故障定位必须使用完整6个scene。
-
-诊断首先保存两路RGB和基于MuJoCo geom ID生成的红绿精确mask，再将256×256 mask按真实512输入与connector结构聚合为8×8、共64个视觉Token的ROI权重。某块积木因视角遮挡而在单路相机中不可见时，工具保留真实的全零mask和零ROI权重；只有两路真实相机都看不到该颜色时才判为无效，不会伪造ROI。启动阶段还会拒绝状态变化、错误位置交换、非目标像素异常漂移和非有限特征。
-
-跨模态和动作阶段使用同一因果选择指数：
-
-```text
-CSI = (D_target - D_distractor) / (D_target + D_distractor + epsilon)
-```
-
-例如red指令中，`D_target`是original与neutralize_red的距离，`D_distractor`是original与neutralize_green的距离。CSI为正表示目标积木的视觉干预影响更大；单个scene的正值不能当作稳定grounding证据。报告以scene为独立单位，给出中位数、正向scene数、按scene Bootstrap 95%区间以及`consistent`、`mixed`或`opposite_or_insensitive`标签。
-
-工具按最早异常环节给出定位：
-
-1. RGB变化但视觉Token不响应：视觉编码器或connector不敏感；
-2. 视觉Token响应但VLM-CSI不为正：颜色词—图像区域grounding不足；
-3. VLM-CSI成立但Action-CSI不成立：动作专家没有有效使用视觉绑定；
-4. Action-CSI成立但位置跟随余弦不稳定：动作到空间方向的映射不足。
-
-产物包括`run_manifest.json`、`fixed_noise.npy`、`counterfactual_inputs/`、`condition_records.jsonl`、`visual_features.npz`、`conditioning_features.npz`、`action_chunks.npz`、三个比较CSV、`summary.json`、`report.md`和两张诊断曲线。`counterfactual_inputs/`中的干预审计JSON用于核验两路相机像素变化没有越出允许ROI。
-
-FK只把50步绝对关节命令投影为attachment-site的运动学轨迹，用于判断交换目标位置后动作方向是否跟随目标；它不推进动力学、不模拟接触，也不等同于闭环抓取成功。视觉Token、VLM特征或Action Chunk存在差异，也都不能单独证明模型正确识别并抓取了目标积木。
-
-### 3.6 Mug视觉鲁棒性扰动评测
-
-面向杯子任务的"部署前鲁棒性验收"工具：固定 `scene_seed × task × prompt(canonical) × policy_seed=20260`，只变化视觉条件，保证成功率差异可归因于扰动。两类扰动：
-
-- **外观变体**（环境级，物理完全一致）：复用 `MugTabletopEnv(appearance_variant=...)` 替换杯子纹理，目前支持 `original`、`green_white`、`changed` 三种；
-- **像素扰动**（图像级）：亮度/对比度/Gamma/高斯噪声/高斯模糊/JPEG 压缩六种，每种若干强度档，通过图像变换注入闭环观测。
-
-正式配置 `configs/diagnose_mug_robustness.yaml` 默认 5 scenes × 2 任务 ×（外观 3 + 像素 18 档）= 210 条条件；`--max-scenes` 与 `--perturbations` 可收缩冒烟：
-
-```powershell
-conda activate smolvla-eval
 python -m evaluate.diagnose_mug_visual_robustness `
   --checkpoint outputs\train\smolvla_ur10e_mug_v1_b8_s8000\checkpoints\008000\pretrained_model `
   --config configs\eval\mug_robustness\diagnose_mug_robustness.yaml `
-  --output-dir outputs\eval\mug_robustness_010000 `
+  --output-dir outputs\eval\mug_robustness `
   --device cuda
 ```
 
-GTX 1650 冒烟只跑亮度维度与前 2 个 scene：
+亮度单 scene 冒烟：
 
 ```powershell
 python -m evaluate.diagnose_mug_visual_robustness `
-  --checkpoint outputs\train\smolvla_ur10e_mug_v1_b8_s8000\checkpoints\last\pretrained_model `
-  --config configs\diagnose_mug_robustness.yaml `
+  --checkpoint outputs\train\smolvla_ur10e_mug_v1_b8_s8000\checkpoints\008000\pretrained_model `
+  --config configs\eval\mug_robustness\diagnose_mug_robustness.yaml `
   --output-dir outputs\eval\mug_robustness_smoke `
-  --device cuda `
-  --max-scenes 2 `
+  --max-scenes 1 `
   --perturbations brightness
 ```
 
-随机扰动（高斯噪声）使用条件派生的确定性随机种子，同一条件下可复现；`image_transform=None` 时行为与正式评测完全一致。视频记录的是扰动后图像（策略真实所见），便于人工复核。
+高斯噪声使用条件派生的确定性随机种子。崩溃阈值定义为成功率首次跌破 `max(0.5, baseline - 20pp)` 的配置档位，baseline 为 `original` 无扰动。
 
-输出结构：
+## 5. 输出与追溯
+
+### 5.1 标准评测产物
 
 ```text
-outputs/eval/mug_robustness_010000/
-├── run_manifest.json          # checkpoint、配置、扰动定义、纹理SHA-256、扰动审计
-├── rollouts.jsonl             # 逐条件结果，支持断点续跑
-├── robustness_aggregate.csv   # 维度×强度成功率 + Bootstrap 95% CI + 崩溃标记
-├── rollout_detail.csv         # 逐条件明细
-├── summary.json               # 机器可读摘要与崩溃阈值
-├── report.md                  # 人工可读报告（含失败阶段分布）
-├── curves/                    # 每个像素扰动维度的成功率-强度曲线PNG
-├── action_traces/              # 与 videos 使用相同的参数目录层级
+outputs/eval/<run>/
+├── run_manifest.json
+├── rollouts.jsonl
+├── rollouts.csv
+├── summary.json
+├── report.md
+├── action_clipping_summary.json
+├── action_clipping_by_dimension.csv
+├── motion_metrics_by_rollout.csv
+├── motion_metrics_summary.json
+├── motion_metrics_report.md
+├── stage_metrics_by_rollout.csv
+├── stage_metrics_summary.json
+├── video_retention.json
+├── rollout_update.json        # 仅 --rerun-failures 模式生成
+├── action_traces/
+└── videos/
+```
+
+每条 rollout 使用稳定实验键：
+
+```text
+scene=<scene_seed>|task=<task_id>|prompt=<prompt_type>|policy=<policy_seed>
+```
+
+`rollouts.jsonl` 每条完成后立即刷新；CSV、summary、report 和各类统计文件在整批完成后生成。`control_exception` 是评测有效性异常，不能当作普通策略失败。
+
+### 5.2 鲁棒性评测产物
+
+```text
+outputs/eval/<robustness-run>/
+├── run_manifest.json
+├── rollouts.jsonl
+├── rollout_detail.csv
+├── robustness_aggregate.csv
+├── summary.json
+├── report.md
+├── curves/
+├── action_traces/
 │   ├── appearance/<variant>/
 │   └── pixel/<扰动名>/<强度>/
 └── videos/
@@ -415,147 +306,29 @@ outputs/eval/mug_robustness_010000/
     └── pixel/<扰动名>/<强度>/
 ```
 
-崩溃阈值规则：成功率首次跌破 `max(0.5, baseline - 20pp)` 的最低强度档（baseline 为 `original` 无扰动成功率）。同一配置对 baseline 与域随机化训练 checkpoint 各跑一次，可产出对比曲线，支撑"评测发现 → 增强解决 → 复测验证"闭环。
+目录强度使用简洁稳定格式，例如 `pixel/brightness/0.5/`、`pixel/jpeg/30/`。视频与动作日志使用相同参数层级，历史产物不会自动迁移。
 
-## 4. 分阶段执行
+## 6. 统计与验收
 
-### 4.1 自动测试
+标准闭环评测至少报告：
 
-```powershell
-conda activate smolvla-eval
-python -m unittest discover -s tests -v
-```
+- 总体严格成功率和按 scene 整组 Bootstrap 95% 区间；
+- 分任务、分 scene、分 prompt 成功率；
+- 失败类型、成功步数、推理延迟；
+- 动作裁剪、运动平滑度和 Mug 阶段分布。
 
-### 4.2 两步链路冒烟
+积木正式配置验收：120 条结果、120 个唯一实验键、10 个 scene、4 个任务、3 种 prompt、固定 `policy_seed=20260`、无 `control_exception`。
 
-只验证checkpoint加载、CUDA前向、随机种子、视频、manifest和JSONL，不评价模型效果：
+杯子 seen/unseen 配置分别验收：40 条结果、40 个唯一实验键、20 个 scene、2 个任务、canonical、固定 `policy_seed=20260`、无 `control_exception`。
 
-```powershell
-.\evaluate\run.ps1 `
-  --checkpoint outputs\train\smolvla_ur10e `
-  --config configs\eval_standard.yaml `
-  --output-dir outputs\eval\smoke_reproducible `
-  --max-rollouts 4 `
-  --max-steps 2 `
-  --keep-all-videos
-```
-
-### 4.3 12条预实验
-
-使用正式配置的第一个scene seed。由于矩阵顺序为`scene → task → prompt → policy`，前12条刚好覆盖：
-
-```text
-1 scene × 4 tasks × 3 prompts × 1 fixed policy seed
-```
+快速检查：
 
 ```powershell
-.\evaluate\run.ps1 `
-  --checkpoint outputs\train\smolvla_ur10e `
-  --config configs\eval_standard.yaml `
-  --output-dir outputs\eval\pilot_020000 `
-  --max-rollouts 12 `
-  --keep-all-videos
-```
-
-预实验用于检查显存、耗时、失败分类和恢复机制，不并入正式120条结果。
-
-### 4.4 正式120条实验
-
-正式运行开始后不得根据中间结果修改checkpoint、seed、措辞、超时或成功条件。
-
-```powershell
-.\evaluate\run.ps1 `
-  --checkpoint outputs\train\smolvla_ur10e_mug_v1_b8_s8000\checkpoints\008000\pretrained_model `
-  --config configs\eval\mug_robustness\diagnose_mug_robustness.yaml `
-  --output-dir outputs\eval\formal_020000
-```
-
-运行中断后使用完全相同的命令并增加`--resume`：
-
-```powershell
-.\evaluate\run.ps1 `
-  --checkpoint outputs\train\smolvla_ur10e_mug_v1_b8_s8000\checkpoints\008000\pretrained_model `
-  --config configs\eval\mug_robustness\diagnose_mug_robustness.yaml `
-  --output-dir outputs\eval\formal_020000 `
-  --resume
-```
-
-默认在整批完成后保留全部失败视频，并为每个`task_id × prompt_type`保留按seed排序的第一条成功视频。若需要保留全部视频，首次启动和每次续跑都必须增加`--keep-all-videos`；视频策略属于manifest身份，不能在同一run中途改变。
-
-## 5. 可恢复性与追溯
-
-每条轨迹以以下字符串作为唯一实验键：
-
-```text
-scene=<scene_seed>|task=<task_id>|prompt=<prompt_type>|policy=<policy_seed>
-```
-
-每条完成后立即落盘到`rollouts.jsonl`并刷新磁盘。`--resume`会：
-
-1. 校验checkpoint、权重SHA-256、评测源码SHA-256、环境、配置、步数、实验键和视频策略；
-2. 拒绝损坏JSONL、重复实验键和缺失的保留视频；
-3. 跳过合法完成项；
-4. 移除并重新执行`control_exception`或带`error`的轨迹。
-
-checkpoint、代码、环境或配置变化时必须创建新输出目录，不能向旧run混写。
-
-## 6. 输出结构
-
-```text
-outputs/eval/formal_020000/
-├── run_manifest.json       # checkpoint、代码、配置、环境和120个实验键
-├── rollouts.jsonl          # 每条完成后即时追加的恢复日志
-├── rollouts.csv            # 最终逐条结果
-├── action_clipping_summary.json       # 总体及七个维度的裁剪统计
-├── action_clipping_by_dimension.csv   # 便于排序检查的逐维裁剪表
-├── summary.json            # 机器可读统计
-├── report.md               # 人工可读报告
-├── video_retention.json    # 成功视频清理与保留清单
-├── action_traces/          # 每个rollout独立的逐步动作JSONL
-└── videos/
-```
-
-每条结果包含`scene_seed`、`policy_seed`、`rollout_key`、任务与措辞、成功和失败类型、步数、推理延迟、动作裁剪率、动作日志路径、checkpoint SHA-256、视频状态、错误和完成时间。
-
-每条动作日志按控制步记录：
-
-```text
-model_output      模型归一化空间的原始七维输出
-physical_action   policy postprocessor反归一化后的物理动作
-executed_action   经过UR10e关节范围和夹爪[0, 1]限位后的实际执行动作
-clipped_mask      七个维度分别是否发生裁剪
-clip_amount       physical_action - executed_action
-chunk_start       当前步是否为新动作chunk的第一步
-```
-
-`action_clipping_by_dimension.csv`分别报告`shoulder_pan`、`shoulder_lift`、`elbow`、三个腕关节和`gripper`的裁剪步数、裁剪率及越界量。`clipped_trace_step_rate`表示“至少一维被裁剪的控制步比例”，`clipped_action_element_rate`表示全部`控制步×7维`元素中的裁剪比例，两者不能混用。
-
-## 7. 统计口径
-
-第一主指标为总体严格成功率，同时报告：
-
-- 按`scene_seed`整组重采样10000次得到的Bootstrap 95%置信区间；
-- 四任务等权宏平均成功率；
-- canonical、synonym、unseen成功率；
-- `seen=(canonical+synonym)/2`与unseen的语言泛化差距；
-- 分任务、分场景结果；policy seed固定为20260，仅作为复现字段；
-- `wrong_cube`、`wrong_pad`、`dropped_or_out_of_bounds`、`timeout`和`control_exception`分布；
-- 成功轨迹步数中位数和P90；
-- 发生裁剪的轨迹比例、总裁剪步数占比、逐维裁剪率和归一化越界量；
-- 推理延迟中位数和P95。
-
-`control_exception`属于评测有效性异常，入口返回非零状态；修复原因后通过`--resume`重跑，不能把它当作普通模型失败解释。
-
-## 8. 结果检查
-
-```powershell
-$rows = Import-Csv outputs\eval\formal_020000\rollouts.csv
+$rows = Import-Csv outputs\eval\<run>\rollouts.csv
 $rows.Count
 ($rows.rollout_key | Sort-Object -Unique).Count
-Get-Content outputs\eval\formal_020000\summary.json -Encoding UTF8
-Get-Content outputs\eval\formal_020000\report.md -Encoding UTF8
+Get-Content outputs\eval\<run>\summary.json -Encoding UTF8
+Get-Content outputs\eval\<run>\report.md -Encoding UTF8
 ```
 
-正式结果必须同时满足：120条结果、120个唯一实验键、10个scene seed、4类任务、3种措辞、固定`policy_seed=20260`、无`control_exception`。
-
-本结果只代表当前checkpoint在本机MuJoCo仿真闭环中的能力，不代表真实UR10e成功率，也不能在缺少基座或其他checkpoint对照时宣称“训练带来提升”。
+所有结果仅代表指定 checkpoint 在当前 MuJoCo 仿真环境中的能力，不代表真实 UR10e 成功率；缺少基线或其他 checkpoint 对照时，也不能单独宣称训练带来提升。
