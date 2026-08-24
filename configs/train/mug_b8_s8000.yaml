@@ -1,3 +1,4 @@
+# 对应 outputs/train/smolvla_ur10e_mug_v1_b8_s8000
 policy:
   model_id: lerobot/smolvla_base
   device: cuda
@@ -9,8 +10,8 @@ dataset:
   video_backend: pyav
 
 train:
-  output_dir: outputs/train/smolvla_ur10e_mug_v1_b8_s10000
-  job_name: smolvla_ur10e_mug_v1_b8_s10000
+  output_dir: outputs/train/smolvla_ur10e_mug_v1_b8_s8000
+  job_name: smolvla_ur10e_mug_v1_b8_s8000
   seed: 1000
   batch_size: 8
   steps: 10000

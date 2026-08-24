@@ -1,0 +1,71 @@
+# 域随机化（Domain Randomization）微调：从 s8000（008000）增强训练 3000 步。
+#
+# 机制：cloud/train.py 将 policy.model_id 映射为 --policy.path=<checkpoint>/pretrained_model，
+# 加载权重与完整策略配置；优化器/调度器全新、step 从 0 计数（LR 重启）。
+# 选择 --policy.path 而非 --resume：resume 会把 LR 恢复到 ~1e-5，增强输入分布适应过慢；
+# 此处 steps=3000 触发调度器自动缩放（warmup 100 → peak 1e-4 → 2.5e-6@3000），
+# 3000 步 ≈ 2.4 epoch（9843 帧 / batch 8 ≈ 1230 步每 epoch），完整走完一次 LR 周期。
+# 目录名按有效总步数命名：8000(已有) + 3000(新增) = 等效 11000；内部 checkpoint 为
+# 001000/002000/003000 + last（--policy.path 语义下 step 从 0 重新编号）。
+#
+# 增强配置对齐评测矩阵（configs/eval/mug_robustness/diagnose_mug_robustness.yaml）：
+#   brightness ×0.5/0.7/0.9 → ColorJitter brightness [0.6, 1.5]
+#   contrast ×0.6/0.8/1.2   → ColorJitter contrast [0.6, 1.4]
+#   gaussian_noise σ5/15/30 → GaussianNoise σ=0.06（torchvision v2 仅支持标量）
+#   gaussian_blur σ1/2/4    → GaussianBlur kernel 5, σ[0.5, 3.0]
+#   gamma / jpeg / 外观变体（纹理级）不在 v2 覆盖范围，本次不训练覆盖（已知边界）。
+policy:
+  model_id: /workspace/smolvla/outputs/train/smolvla_ur10e_mug_v1_b8_s8000/checkpoints/008000/pretrained_model
+  device: cuda
+  use_amp: true
+  empty_cameras: 1
+
+dataset:
+  repo_id: smolvla_ur10e_mug_v1
+  video_backend: pyav
+  image_transforms:
+    enable: true
+    max_num_transforms: 3
+    tfs:
+      brightness:
+        weight: 1.0
+        type: ColorJitter
+        kwargs: {brightness: [0.6, 1.5]}
+      contrast:
+        weight: 1.0
+        type: ColorJitter
+        kwargs: {contrast: [0.6, 1.4]}
+      saturation:
+        weight: 1.0
+        type: ColorJitter
+        kwargs: {saturation: [0.5, 1.5]}
+      hue:
+        weight: 0.5
+        type: ColorJitter
+        kwargs: {hue: [-0.05, 0.05]}
+      sharpness:
+        weight: 1.0
+        type: SharpnessJitter
+        kwargs: {sharpness: [0.5, 1.5]}
+      affine:
+        weight: 1.0
+        type: RandomAffine
+        kwargs: {degrees: [-5.0, 5.0], translate: [0.05, 0.05]}
+      gaussian_noise:
+        weight: 1.0
+        type: GaussianNoise
+        kwargs: {mean: 0.0, sigma: 0.06}
+      gaussian_blur:
+        weight: 1.0
+        type: GaussianBlur
+        kwargs: {kernel_size: 5, sigma: [0.5, 3.0]}
+
+train:
+  output_dir: outputs/train/smolvla_ur10e_mug_v1_b8_s11000_dr
+  job_name: smolvla_ur10e_mug_v1_b8_s11000_dr
+  seed: 1000
+  batch_size: 8
+  steps: 3000
+  num_workers: 2
+  log_freq: 20
+  save_freq: 1000

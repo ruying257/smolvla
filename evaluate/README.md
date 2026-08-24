@@ -2,6 +2,83 @@
 
 本目录提供 SmolVLA 在 MuJoCo 中的标准闭环评测、失败归因和视觉鲁棒性评测。正式结论应来自固定实验矩阵上的重复闭环成功率，不能用训练 loss、单条视频或静态特征差异代替。
 
+## 0. 常用命令速查
+
+前置：先激活 `smolvla-eval` conda 环境。
+
+```powershell
+cd F:\桌面\smolvla
+conda activate smolvla-eval
+```
+
+> 占位符约定：`<ckpt>` 为 checkpoint 路径（训练输出根目录或具体 `pretrained_model`），`<config>` 为评测 YAML，`<run>` 为输出目录。
+
+### 标准闭环评测
+
+```powershell
+# 冒烟：1 条 rollout、2 步，仅验证加载/CUDA/场景/视频/日志链路
+.\evaluate\run.ps1 `
+  --checkpoint <ckpt> `
+  --config configs\eval\mug_v1.yaml `
+  --output-dir outputs\eval\mug_v1_smoke `
+  --max-rollouts 1 `
+  --max-steps 2
+
+# 正式完整矩阵
+.\evaluate\run.ps1 `
+  --checkpoint <ckpt> `
+  --config <config> `
+  --output-dir <run>
+
+# 中断后续跑（必须与首次完全相同的 ckpt/config/output-dir）
+.\evaluate\run.ps1 `
+  --checkpoint <ckpt> `
+  --config <config> `
+  --output-dir <run> `
+  --resume
+
+# 成功判据修订后只重跑失败项（不能与 --resume/--scene-seed/--max-rollouts 组合）
+.\evaluate\run.ps1 `
+  --checkpoint <ckpt> `
+  --config <config> `
+  --output-dir <run> `
+  --rerun-failures
+```
+
+### Mug 视觉鲁棒性评测
+
+```powershell
+# 完整运行
+python -m evaluate.diagnose_mug_visual_robustness `
+  --checkpoint <ckpt> `
+  --config configs\eval\mug_robustness\diagnose_mug_robustness.yaml `
+  --output-dir outputs\eval\mug_robustness `
+  --device cuda
+
+# 亮度单 scene 冒烟
+python -m evaluate.diagnose_mug_visual_robustness `
+  --checkpoint <ckpt> `
+  --config configs\eval\mug_robustness\diagnose_mug_robustness.yaml `
+  --output-dir outputs\eval\mug_robustness_smoke `
+  --max-scenes 1 `
+  --perturbations brightness
+```
+
+### 测试与结果检查
+
+```powershell
+# 修改评测逻辑后运行单元测试
+python -m unittest discover -s tests -v
+
+# 快速检查某次运行的统计
+$rows = Import-Csv outputs\eval\<run>\rollouts.csv
+$rows.Count
+($rows.rollout_key | Sort-Object -Unique).Count
+Get-Content outputs\eval\<run>\summary.json -Encoding UTF8
+Get-Content outputs\eval\<run>\report.md -Encoding UTF8
+```
+
+
 ## 1. 工具结构
 
 | 文件 | 作用 | 是否推进物理 |

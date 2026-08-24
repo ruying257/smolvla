@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 from pathlib import Path
 from typing import Any, Sequence
@@ -78,7 +79,7 @@ def build_train_command(
     steps = 1 if smoke else int(train.get("steps", 20_000))
     batch_size = 1 if smoke else int(train.get("batch_size", 1))
     save_freq = 1 if smoke else int(train.get("save_freq", steps))
-    return [
+    command = [
         executable,
         f"--policy.path={policy.get('model_id', 'lerobot/smolvla_base')}",
         "--policy.input_features=null",
@@ -102,6 +103,8 @@ def build_train_command(
         f"--output_dir={output_dir}",
         f"--job_name={job_name}",
     ]
+    _append_image_transforms_args(command, dataset)
+    return command
 
 
 def _build_resume_command(
@@ -167,7 +170,50 @@ def _build_resume_command(
         command.append(f"--scheduler.num_warmup_steps={int(warmup)}")
     if decay is not None:
         command.append(f"--scheduler.num_decay_steps={int(decay)}")
+    _append_image_transforms_args(command, dataset)
     return command
+
+
+def _append_image_transforms_args(command: list[str], dataset: dict[str, Any]) -> None:
+    """把配置中的 ``dataset.image_transforms`` 段序列化为 LeRobot CLI 参数。
+
+    域随机化训练增强：``--dataset.image_transforms.enable=true`` 后，数据集每次采样
+    都会对每帧施加随机子集增强（``RandomSubsetApply``）。
+
+    注意：draccus 不支持嵌套的 ``--dataset.image_transforms.tfs.<name>.*`` 参数，
+    整个 ``tfs`` 字典必须作为单个 JSON 字符串传入 ``--dataset.image_transforms.tfs=<json>``
+    （已实测可被正确解析为 ``dict[str, ImageTransformConfig]``）。
+
+    Args:
+        command: 正在构造的命令列表，原地追加参数。
+        dataset: 配置的 ``dataset`` 段。
+    """
+    transforms = dataset.get("image_transforms")
+    if not transforms:
+        return
+    if not isinstance(transforms, dict):
+        raise ValueError("配置段 dataset.image_transforms 必须是映射")
+
+    enable = transforms.get("enable", True)
+    if not isinstance(enable, bool):
+        raise ValueError("dataset.image_transforms.enable 必须是布尔值")
+    command.append(f"--dataset.image_transforms.enable={'true' if enable else 'false'}")
+
+    max_num = transforms.get("max_num_transforms")
+    if max_num is not None:
+        command.append(f"--dataset.image_transforms.max_num_transforms={int(max_num)}")
+
+    random_order = transforms.get("random_order")
+    if random_order is not None:
+        if not isinstance(random_order, bool):
+            raise ValueError("dataset.image_transforms.random_order 必须是布尔值")
+        command.append(f"--dataset.image_transforms.random_order={'true' if random_order else 'false'}")
+
+    tfs = transforms.get("tfs")
+    if tfs is not None:
+        if not isinstance(tfs, dict):
+            raise ValueError("dataset.image_transforms.tfs 必须是映射")
+        command.append(f"--dataset.image_transforms.tfs={json.dumps(tfs, ensure_ascii=False)}")
 
 
 def _mapping(config: dict[str, Any], key: str) -> dict[str, Any]:

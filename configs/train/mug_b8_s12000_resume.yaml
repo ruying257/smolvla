@@ -19,11 +19,11 @@ dataset:
   video_backend: pyav
 
 train:
-  output_dir: outputs/train/smolvla_ur10e_mug_v1_b8_s15000
-  job_name: smolvla_ur10e_mug_v1_b8_s15000
+  output_dir: outputs/train/smolvla_ur10e_mug_v1_b8_s12000
+  job_name: smolvla_ur10e_mug_v1_b8_s12000
   seed: 1000
   batch_size: 8
-  steps: 15000
+  steps: 12000
   num_workers: 2
   log_freq: 20
   save_freq: 2000
