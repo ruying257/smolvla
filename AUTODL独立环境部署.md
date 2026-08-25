@@ -75,15 +75,20 @@ conda create -y -n smolvla-cloud python=3.10 pip
 > 不要使用镜像 base（Python 3.12 / torch 2.8.0+cu128）：项目锁定的依赖与本地评测均按 Python 3.10/3.11 + cu126 验证。
 > 若系统盘空间紧张，可用前缀方式把环境建到数据盘：`conda create -y -p /root/autodl-tmp/conda-envs/smolvla-cloud python=3.10 pip`，后续命令中的环境 python 路径对应改为 `/root/autodl-tmp/conda-envs/smolvla-cloud/bin/python`。
 
-## 4. 设置数据盘缓存
+## 4. 设置数据盘缓存与 HF 镜像
+
+每次会话开始时执行：
 
 ```bash
 cd /root/autodl-tmp/smolvla
 export HF_HOME=/root/autodl-tmp/hf-cache
 export HUGGINGFACE_HUB_CACHE=/root/autodl-tmp/hf-cache/hub
+export HF_ENDPOINT=https://hf-mirror.com   # 必须：国内直连 huggingface.co 不稳定
 ```
 
-每个会话都要设置；环境初始化、smoke test 和正式训练前都必须已设置，避免模型缓存写入系统盘。
+上述变量必须在环境初始化、smoke test 和正式训练前设置：前两个避免模型缓存写入系统盘；`HF_ENDPOINT` 让模型下载走 `hf-mirror.com` 镜像（内容与官方一致）。
+
+> 如果出现 `OSError: We couldn't connect to 'https://huggingface.co' ...`，说明本会话没有设置 `HF_ENDPOINT`（或镜像不通）：先执行 `export HF_ENDPOINT=https://hf-mirror.com`，再重新运行刚才失败的步骤（bootstrap 或 smoke/train）。
 
 ## 5. 创建项目独立环境（.venv-cloud，cu126）
 
@@ -263,6 +268,7 @@ bash Miniforge3-Linux-x86_64.sh -b -p /root/autodl-tmp/miniforge3
 cd /root/autodl-tmp/smolvla
 export HF_HOME=/root/autodl-tmp/hf-cache
 export HUGGINGFACE_HUB_CACHE=/root/autodl-tmp/hf-cache/hub
+export HF_ENDPOINT=https://hf-mirror.com   # 必须：国内直连 huggingface.co 不稳定
 source .venv-cloud/bin/activate
 ```
 

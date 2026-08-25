@@ -1,0 +1,26 @@
+# 干净门快速检查：只测 (original, default) 10 条 rollout。
+# 用于训练完成后先验证"干净不回归"（≥ max(0.6, s12000干净−0.1)=0.7），
+# 通过后再跑 diagnose_mug_robustness_dr.yaml 的 120 条件全矩阵。
+diagnostic:
+  environment: mug
+  output_dir: outputs/eval/mug_robustness_dr_clean
+  fps: 20
+  max_steps: 360
+  scene_seeds:
+    - 2291
+    - 6705
+    - 1894
+    - 9864
+    - 8669
+  task_ids:
+    - mug_on_blue
+    - mug_on_yellow
+  prompt_type: canonical
+  policy_seeds:
+    - 20260
+  appearance_variants:
+    - original
+  lighting_presets:
+    default: {a_scale: 1.0, b_azimuth_deg: 0.0, c_scale: 1.0}
+  holdout_presets: []
+  collapse_baseline_drop_pp: 20
