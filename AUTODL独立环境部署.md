@@ -1,76 +1,81 @@
-# AutoDL 独立 cu126 环境部署（镜像 CUDA13.0-Torch2.7.0-Python3.11 v2）
+# AutoDL conda 环境部署（RTX 4090 / PyTorch 2.7.0 cu126 / SmolVLA）
 
-本文适用于 AutoDL 镜像 `CUDA13.0-Torch2.7.0-Python3.11` v2（镜像地址：<https://www.autodl.art/i/NVIDIA/cuda-samples/CUDA13.0-Torch2.7.0-Python3.11/2457/2>）和 RTX 4090 24GB 实例。
+本文基于本次 AutoDL 实例（`autodl-container-a5904787c3-a9362940`，Ubuntu 22.04，RTX 4090 24GB）的实际环境报告编写，目标是装好项目锁定环境并跑通 smoke 与正式训练。
 
-**环境版本结论（镜像选择用）**：
+## 0. 版本结论与服务器现状
 
-- PyTorch `2.7.0`，CUDA 12.6 构建（官方 `cu126` wheel）；torchvision `0.22.0`、torchcodec `0.5.0`；
-- LeRobot `0.4.4`、MuJoCo `3.6.0`、transformers `4.57.1`、accelerate `1.11.0`、numpy `2.2.6`（完整锁定清单见 `constraints.txt`）；
-- Python 3.10 或 3.11（镜像自带 Python 3.11 即可用）。
+**版本锁定（与本地评测机一致，来自 `constraints.txt`）**：
 
-镜像只提供 Ubuntu、Python 3.11 与 NVIDIA 驱动。**项目不复用镜像预装的 PyTorch/cu130**，而是在数据盘项目目录内创建独立的 `.venv-cloud`，安装项目锁定的 PyTorch 2.7.0/cu126 环境。该构建与本地 RTX 4060 评测机（同一 `cu126` 源安装）一致，保证 checkpoint 在云端训练与本机评测两端兼容。
+- PyTorch `2.7.0` / CUDA 12.6（官方 `cu126` wheel）；torchvision `0.22.0`、torchcodec `0.5.0`；
+- LeRobot `0.4.4`、MuJoCo `3.6.0`、transformers `4.57.1`、accelerate `1.11.0`、numpy `2.2.6`；
+- Python 3.10（用 conda 新建环境）。
+
+**本次服务器报告要点**：
+
+| 项目 | 状态 |
+| --- | --- |
+| GPU / 驱动 | RTX 4090 24GB，驱动 580.76.05（CUDA 13.0），compute 8.9 ✔ |
+| conda | `/root/miniconda3` 存在；**base 为 Python 3.12.3**，自带 torch 2.8.0+cu128（**项目不使用**） |
+| 项目代码 | 已上传：`/root/autodl-tmp/smolvla`，git `main` @ `737007b` ✔ |
+| 数据集 | `smolvla-data/smolvla_ur10e_mug_v1`（meta/data/videos）**未上传** ✘ |
+| ffmpeg / EGL | 缺失，需 apt 安装（bootstrap 会装） |
+| nvcc / CUDA_HOME | 缺失 / 未设置，**无需处理**（cu126 wheel 自带 CUDA 运行时） |
+
+结论：镜像的 conda base 是 Python 3.12（项目只支持 3.10/3.11），且 base 里的 torch 是 cu128 构建（与本地 cu126 评测环境不一致），不能直接复用。方案：**用 conda 新建 Python 3.10 环境，再在其上创建项目独立 `.venv-cloud`（cu126）**，与本地评测环境完全一致。
 
 ## 1. 准备服务器
 
-建议配置：
+- 数据盘 `/dev/md0` 当前 50GB、几乎全空；代码、虚拟环境、Hugging Face 缓存、数据和 checkpoint 全部放 `/root/autodl-tmp`，不放 30GB 系统盘；
+- 50GB 足够 smoke 与 mug_v1 正式训练；磁盘紧张时在控制台扩容数据盘即可，不影响已装环境。
 
-- 单张 RTX 4090 24GB；
-- 数据盘至少 100GB，推荐 150GB；
-- 代码、虚拟环境、Hugging Face 缓存、数据和 checkpoint 全部放在 `/root/autodl-tmp`；
-- 不把上述内容放进 30GB 系统盘。
+## 2. 上传数据集（代码已在）
 
-首次启动该镜像后，在默认目录执行镜像提供的 Python 初始化：
+代码已在 `/root/autodl-tmp/smolvla`，当前只缺数据集。在本机项目根目录把 `smolvla-data/smolvla_ur10e_mug_v1/`（`meta` + `data` + `videos`）打包（zip 顶层为 `smolvla_ur10e_mug_v1/`）：
 
-```bash
-bash setup_base.sh
-uenv
-python --version   # 期望 Python 3.11
+```powershell
+# 本机 PowerShell，在 F:\桌面\smolvla 下执行
+Compress-Archive -Path smolvla-data\smolvla_ur10e_mug_v1 -DestinationPath smolvla-mug-v1-data.zip
 ```
 
-这里只借用镜像的 Python 3.11 解释器创建新环境，不使用其已有 PyTorch 参与项目训练。
-
-> 如果 `setup_base.sh` / `uenv` 不存在、失败或镜像 Python 不可用，不要停在原地：直接跳到[第 10 节 conda 回退](#10-镜像-python-不可用时的-conda-回退)，用 Miniforge 提供干净的 Python 3.10，其余步骤完全相同。注意 conda 只解决 Python 层，驱动/GPU 问题必须先过 `nvidia-smi` 门禁。
-
-## 2. 上传两个压缩包
-
-本机需要上传：
-
-```text
-smolvla-autodl-cu126-code.zip    # 代码、MuJoCo 资源、配置和环境脚本（Git 拉取或整目录打包）
-smolvla-mug-v1-data.zip          # mug_v1 数据集（meta + data + videos，单独打包）
-```
-
-把两个文件上传到 `/root/autodl-tmp/`，服务器端解压：
+上传到 `/root/autodl-tmp/` 后解压到 `smolvla/smolvla-data/` 并校验：
 
 ```bash
-mkdir -p /root/autodl-tmp/smolvla
-unzip -q /root/autodl-tmp/smolvla-autodl-cu126-code.zip \
-  -d /root/autodl-tmp/smolvla
-mv /root/autodl-tmp/smolvla-mug-v1-data.zip \
-  /root/autodl-tmp/smolvla/smolvla-mug-v1-data.zip
+cd /root/autodl-tmp
+mkdir -p smolvla/smolvla-data
+unzip -q smolvla-mug-v1-data.zip -d smolvla/smolvla-data/
 
 cd /root/autodl-tmp/smolvla
-unzip -q smolvla-mug-v1-data.zip -d .
-```
-
-检查代码和数据集：
-
-```bash
-test -f scripts/bootstrap_cloud.sh
-test -f configs/train/mug_b8_s8000.yaml
 test -f smolvla-data/smolvla_ur10e_mug_v1/meta/info.json
 test -d smolvla-data/smolvla_ur10e_mug_v1/data
 test -d smolvla-data/smolvla_ur10e_mug_v1/videos
 ```
 
-注意：
+> 如果 zip 顶层带 `smolvla-data/` 前缀（例如用 `zip -r smolvla-mug-v1-data.zip smolvla-data/smolvla_ur10e_mug_v1` 打包），解压目标改为 `-d smolvla/`，然后执行同样的三条校验。
 
-- `smolvla-data/` 与 `configs/0-legacy/` 都在 `.gitignore` 里，Git 传输不会带上：数据必须单独打包；正式训练必须使用被跟踪的 `configs/train/` 配置（`configs/0-legacy/` 下的旧配置不会出现在服务器上）。
-- 本地 `smolvla-data/smolvla_ur10e_mug_v1` 当前只有 `chunk-000`（单条 episode 的 smoke 子集），只用于环境与训练链路验证；正式训练前必须替换为完整 mug_v1 数据。
+注意：本地 `smolvla_ur10e_mug_v1` 目前只有 `chunk-000`（1 条 episode 的 smoke 子集），只用于环境与训练链路验证；正式训练前必须替换为完整数据。
 
-## 3. 设置数据盘缓存
+## 3. 用 conda 创建 Python 3.10 环境
 
-每次开机后执行：
+镜像自带 conda（`/root/miniconda3`）。创建项目专用环境：
+
+```bash
+# 可选：conda 下载慢时先配置清华镜像
+# conda config --add channels https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/main/
+# conda config --add channels https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/free/
+
+conda create -y -n smolvla-cloud python=3.10 pip
+```
+
+确认环境解释器路径（后续 bootstrap 直接用它，不需要激活环境）：
+
+```bash
+/root/miniconda3/envs/smolvla-cloud/bin/python --version   # 期望 Python 3.10.x
+```
+
+> 不要使用镜像 base（Python 3.12 / torch 2.8.0+cu128）：项目锁定的依赖与本地评测均按 Python 3.10/3.11 + cu126 验证。
+> 若系统盘空间紧张，可用前缀方式把环境建到数据盘：`conda create -y -p /root/autodl-tmp/conda-envs/smolvla-cloud python=3.10 pip`，后续命令中的环境 python 路径对应改为 `/root/autodl-tmp/conda-envs/smolvla-cloud/bin/python`。
+
+## 4. 设置数据盘缓存
 
 ```bash
 cd /root/autodl-tmp/smolvla
@@ -78,54 +83,47 @@ export HF_HOME=/root/autodl-tmp/hf-cache
 export HUGGINGFACE_HUB_CACHE=/root/autodl-tmp/hf-cache/hub
 ```
 
-上述变量必须在环境初始化、smoke test 和正式训练前设置，避免模型缓存写入系统盘。
+每个会话都要设置；环境初始化、smoke test 和正式训练前都必须已设置，避免模型缓存写入系统盘。
 
-## 4. 只读检查镜像环境
+## 5. 创建项目独立环境（.venv-cloud，cu126）
 
-创建项目环境前先保存服务器报告：
+PyPI 依赖下载慢时，先设置清华 pip 镜像（只影响普通依赖，torch 安装由 `--torch-index-url` 单独指定）：
 
 ```bash
-cd /root/autodl-tmp/smolvla
-bash scripts/check_server_environment.sh \
-  --python "$(command -v python)" \
-  --output outputs/server_environment_before_bootstrap.txt
+pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
-报告中应至少确认：Python 3.11、RTX 4090 24GB、NVIDIA 驱动可见、项目与数据目录存在（`configs/train/mug_b8_s8000.yaml`、`smolvla-data/smolvla_ur10e_mug_v1/`）。此时显示镜像的 cu130 属于正常现象，不是最终训练环境。
-
-## 5. 创建项目独立环境
-
-执行项目初始化脚本，并显式指定 PyTorch 官方 cu126 源：
+然后执行 bootstrap（在 conda Python 3.10 之上完成全部安装）：
 
 ```bash
 cd /root/autodl-tmp/smolvla
 bash scripts/bootstrap_cloud.sh \
-  --python "$(command -v python)" \
-  --torch-index-url https://download.pytorch.org/whl/cu126 \
+  --python /root/miniconda3/envs/smolvla-cloud/bin/python \
   --install-system-packages
 ```
 
 该命令会：
 
-1. 安装 FFmpeg、EGL、OpenGL 和 `python3-venv` 系统库；
+1. apt 安装 ffmpeg、libegl1、libgl1、libglvnd0、python3-venv（当前是 root，脚本直接 apt-get）；
 2. 创建 `/root/autodl-tmp/smolvla/.venv-cloud`；
-3. 安装 PyTorch 2.7.0/cu126、torchvision 0.22.0；
+3. 安装 PyTorch 2.7.0/cu126、torchvision 0.22.0（默认南京大学 cu126 镜像；官方源更慢时用下面命令）；
 4. 按 `constraints.txt` 安装 LeRobot 0.4.4、TorchCodec 0.5.0、MuJoCo 3.6.0 等依赖；
 5. 检查 GPU、显存、公开模型下载和 MuJoCo EGL 双相机渲染。
 
-如果 PyTorch 官方源访问缓慢，可改用项目默认的南京大学 cu126 镜像：
+PyTorch 官方源安装（cu126）：
 
 ```bash
 bash scripts/bootstrap_cloud.sh \
-  --python "$(command -v python)" \
+  --python /root/miniconda3/envs/smolvla-cloud/bin/python \
+  --torch-index-url https://download.pytorch.org/whl/cu126 \
   --install-system-packages
 ```
 
 不要在已有的 `.venv-cloud` 上反复执行初始化。首次初始化中断时，优先把完整报错发回定位；确认需要重建后再删除该环境或换一个新的 `--venv` 路径。
 
-## 6. 验证独立环境
+> 不要删除 conda 环境 `smolvla-cloud`：`.venv-cloud` 的 Python 解释器指向它（Linux venv 以符号链接方式复用基础解释器）。
 
-激活项目环境：
+## 6. 验证独立环境
 
 ```bash
 source /root/autodl-tmp/smolvla/.venv-cloud/bin/activate
@@ -158,9 +156,9 @@ CUDA available: True
 GPU: NVIDIA GeForce RTX 4090
 ```
 
-`nvidia-smi` 显示 CUDA 13.0 而 `torch.version.cuda` 显示 12.6 是正常的：前者是驱动支持能力，后者是项目 PyTorch wheel 自带的 CUDA 运行时。
+`nvidia-smi` 显示 CUDA 13.0 而 `torch.version.cuda` 显示 12.6 是正常的：前者是驱动支持能力，后者是项目 PyTorch wheel 自带的 CUDA 运行时。`nvcc` 缺失、`CUDA_HOME` 未设置均无需处理。
 
-## 7. 单步 smoke test
+## 7. 单步 smoke test（需要数据已上传）
 
 ```bash
 cd /root/autodl-tmp/smolvla
@@ -207,6 +205,10 @@ outputs/train/smolvla_ur10e_mug_v1_b8_s8000/checkpoints/
 
 训练结束后下载完整 `pretrained_model/` 目录，不得只下载 `model.safetensors`。
 
+> **WandB 提示**：训练固定开启 `wandb.enable=true`。如果服务器上未登录 wandb，训练可能卡在 "Create a W&B account" 之类的交互提示处，任选其一解决：
+> - `wandb login` 后粘贴 API Key；
+> - 或 `export WANDB_MODE=offline`（只在本地记录，不同步云端）。
+
 ## 9. 从腾讯云 checkpoint 恢复训练（应对训练中断）
 
 腾讯云训练中断或迁移时，不要重头训练：从已有 checkpoint 完整恢复 step、优化器、调度器与 RNG。
@@ -237,19 +239,13 @@ bash scripts/train.sh \
 - DR 微调配置 `configs/train/mug_b8_s8000plus3000_dr.yaml` 从 `--policy.path` 加载 s8000 checkpoint（优化器/调度器全新、LR 重启），需要 s8000 checkpoint 已在服务器上；
 - 恢复前确认数据集与训练时一致（`repo_id=smolvla_ur10e_mug_v1`），且 `--dataset-root` 指向完整数据。
 
-## 10. 镜像 Python 不可用时的 conda 回退
+## 10. conda 缺失时的 Miniforge 安装（本实例不需要）
 
-如果镜像首启的 `setup_base.sh` / `uenv` 失败，或镜像 Python 不可用，用 Miniforge 提供干净的 Python 3.10：
-
-先确认驱动层可用（conda 无法修复驱动/GPU 问题）：
+本次实例已有 `/root/miniconda3`，跳过本节约 30 分钟。若换到没有 conda 的实例，才需要安装 Miniforge 到数据盘：
 
 ```bash
-nvidia-smi
-```
+nvidia-smi   # 先确认驱动层可用（conda 无法修复驱动/GPU 问题）
 
-检查是否已有 conda；无则安装 Miniforge 到数据盘：
-
-```bash
 command -v conda || ls /root/miniconda3/bin/conda /opt/conda/bin/conda 2>/dev/null
 
 cd /root/autodl-tmp
@@ -257,23 +253,7 @@ wget -q https://github.com/conda-forge/miniforge/releases/latest/download/Minifo
 bash Miniforge3-Linux-x86_64.sh -b -p /root/autodl-tmp/miniforge3
 ```
 
-创建项目 Python 环境：
-
-```bash
-source /root/autodl-tmp/miniforge3/etc/profile.d/conda.sh
-conda create -y -n smolvla-cloud python=3.10 pip
-```
-
-用与第 5 节相同的 bootstrap 脚本，`--python` 指向 conda 环境解释器：
-
-```bash
-cd /root/autodl-tmp/smolvla
-bash scripts/bootstrap_cloud.sh \
-  --python /root/autodl-tmp/miniforge3/envs/smolvla-cloud/bin/python \
-  --install-system-packages
-```
-
-bootstrap 会在该 Python 之上创建 `.venv-cloud` 并安装 cu126 依赖；此后第 6-9 节的验证、smoke、训练与恢复命令完全不变（脚本默认使用 `.venv-cloud/bin/python`）。
+随后把第 3 节的 conda 命令换成 `/root/autodl-tmp/miniforge3/bin/conda`，环境 python 路径换成 `/root/autodl-tmp/miniforge3/envs/smolvla-cloud/bin/python`，其余步骤（第 4-9 节）不变。
 
 ## 11. 再次开机
 
@@ -286,4 +266,4 @@ export HUGGINGFACE_HUB_CACHE=/root/autodl-tmp/hf-cache/hub
 source .venv-cloud/bin/activate
 ```
 
-随后继续执行 smoke test 或训练命令即可。
+随后继续执行 smoke test 或训练命令即可。若实例被重装（系统盘 conda 被清空），按第 3、5 节重建环境。
