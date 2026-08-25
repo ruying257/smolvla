@@ -74,12 +74,59 @@ class CloudTrainingCommandTests(unittest.TestCase):
         draccus 不支持嵌套的 ``tfs.<name>.*`` CLI 参数，整个 tfs 字典必须作为
         单个 JSON 字符串传入；enable/max_num_transforms 单独传参。
         """
-        config = load_yaml_config(PROJECT_ROOT / "configs" / "train" / "mug_b8_s15000_dr.yaml")
+        config = {
+            "policy": {
+                "model_id": "/srv/smolvla/outputs/train/xxx/pretrained_model",
+                "device": "cuda",
+                "use_amp": True,
+                "empty_cameras": 1,
+            },
+            "dataset": {
+                "repo_id": "smolvla_ur10e_mug_v1",
+                "video_backend": "pyav",
+                "image_transforms": {
+                    "enable": True,
+                    "max_num_transforms": 3,
+                    "tfs": {
+                        "brightness": {
+                            "weight": 1.0,
+                            "type": "ColorJitter",
+                            "kwargs": {"brightness": [0.6, 1.5]},
+                        },
+                        "contrast": {
+                            "weight": 1.0,
+                            "type": "ColorJitter",
+                            "kwargs": {"contrast": [0.6, 1.4]},
+                        },
+                        "gaussian_noise": {
+                            "weight": 1.0,
+                            "type": "GaussianNoise",
+                            "kwargs": {"mean": 0.0, "sigma": 0.06},
+                        },
+                        "gaussian_blur": {
+                            "weight": 1.0,
+                            "type": "GaussianBlur",
+                            "kwargs": {"kernel_size": 5, "sigma": [0.5, 3.0]},
+                        },
+                    },
+                },
+            },
+            "train": {
+                "output_dir": "outputs/train/xxx",
+                "job_name": "xxx",
+                "seed": 1000,
+                "batch_size": 8,
+                "steps": 3000,
+                "num_workers": 2,
+                "log_freq": 20,
+                "save_freq": 1000,
+            },
+        }
         command = build_train_command(
             config,
             Path("/srv/smolvla-data/smolvla_ur10e_mug_v1"),
-            Path("/srv/smolvla/outputs/train/smolvla_ur10e_mug_v1_b8_s11000_dr"),
-            "smolvla_ur10e_mug_v1_b8_s11000_dr",
+            Path("/srv/smolvla/outputs/train/xxx"),
+            "xxx",
         )
         self.assertIn("--dataset.image_transforms.enable=true", command)
         self.assertIn("--dataset.image_transforms.max_num_transforms=3", command)
@@ -93,10 +140,35 @@ class CloudTrainingCommandTests(unittest.TestCase):
         self.assertEqual(payload["gaussian_blur"]["kwargs"]["sigma"], [0.5, 3.0])
         self.assertEqual(payload["gaussian_blur"]["kwargs"]["kernel_size"], 5)
 
+    def test_scheduler_peak_lr_override_is_appended(self) -> None:
+        """train.scheduler_peak_lr 必须生成 --scheduler.peak_lr=（遗忘震荡回退杠杆）。"""
+        config = {
+            "policy": {"model_id": "lerobot/smolvla_base", "device": "cuda", "use_amp": True, "empty_cameras": 1},
+            "dataset": {"repo_id": "smolvla_ur10e_mug_v1", "video_backend": "pyav"},
+            "train": {
+                "output_dir": "outputs/train/xxx",
+                "job_name": "xxx",
+                "seed": 1000,
+                "batch_size": 8,
+                "steps": 6000,
+                "num_workers": 2,
+                "log_freq": 20,
+                "save_freq": 1000,
+                "scheduler_peak_lr": 3e-5,
+            },
+        }
+        command = build_train_command(
+            config,
+            Path("/srv/smolvla-data/smolvla_ur10e_mug_v1"),
+            Path("/srv/smolvla/outputs/train/xxx"),
+            "xxx",
+        )
+        self.assertIn("--scheduler.peak_lr=3e-05", command)
+
     def test_default_dataset_is_inside_project(self) -> None:
         """未显式传参时应读取项目内的数据集目录。"""
         args = build_train_parser().parse_args([])
-        self.assertEqual(args.dataset_root, PROJECT_ROOT / "smolvla-data" / "smolvla_ur10e_grounding_v2")
+        self.assertEqual(args.dataset_root, PROJECT_ROOT / "smolvla-data" / "smolvla_ur10e_mug_v1")
 
 
 if __name__ == "__main__":

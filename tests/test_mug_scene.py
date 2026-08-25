@@ -276,6 +276,53 @@ class MugTabletopEnvTest(unittest.TestCase):
             MugTabletopEnv(appearance_variant="blue")
 
 
+class MugDomainRandomizationTest(unittest.TestCase):
+    """验证环境级域随机化（光照）的确定性、渲染生效与正交性。"""
+
+    def test_set_domain_is_deterministic(self) -> None:
+        """同一 domain_seed 必须严格复现同一组光照参数。"""
+        with MugTabletopEnv() as env:
+            first = env.set_domain(42)
+            second = env.set_domain(42)
+            self.assertEqual(first, second)
+            self.assertEqual(set(first), {"domain_seed", "light_A_scale", "light_B_azimuth_deg", "light_C_scale"})
+            self.assertIn(first["domain_seed"], (42,))
+            for key in ("light_A_scale", "light_C_scale"):
+                self.assertTrue(0.4 <= first[key] <= 1.6)
+            self.assertTrue(-36.0 <= first["light_B_azimuth_deg"] <= 36.0)
+
+    def test_set_domain_changes_render(self) -> None:
+        """随机化光照必须实际改变 agent 相机渲染像素。"""
+        with MugTabletopEnv() as env:
+            env.reset(scene_seed=7)
+            default_image = env.capture_camera("agentview")
+            env.set_domain(2024)
+            env.reset(scene_seed=7)
+            randomized_image = env.capture_camera("agentview")
+            changed = int(np.count_nonzero(randomized_image != default_image))
+            self.assertGreater(changed, 1000)
+
+    def test_domain_is_orthogonal_to_scene_seed(self) -> None:
+        """光照参数只由 domain_seed 决定，与 reset 的 scene_seed 无关。"""
+        with MugTabletopEnv() as env:
+            env.set_domain(42)
+            env.reset(scene_seed=1)
+            first = env.domain_summary()
+            env.set_domain(42)
+            env.reset(scene_seed=2)
+            second = env.domain_summary()
+            self.assertEqual(first, second)
+
+    def test_reset_remains_compatible_after_domain(self) -> None:
+        """set_domain 之后旧 reset(scene_seed) 契约保持成立。"""
+        with MugTabletopEnv() as env:
+            env.set_domain(99)
+            snapshot = env.reset(scene_seed=0)
+            self.assertEqual(snapshot.scene_seed, 0)
+            self.assertTrue(np.isfinite(snapshot.mug_initial_pose).all())
+            self.assertEqual(snapshot.pad_positions.shape, (2, 3))
+
+
 class MugDocumentationTest(unittest.TestCase):
     """检查新增杯子Python接口的中文文档字符串。"""
 

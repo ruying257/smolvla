@@ -17,8 +17,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dataset-root",
         type=Path,
-        default=PROJECT_ROOT / "smolvla-data" / "smolvla_ur10e",
-        help="包含 1 至 4 条示范的数据集目录，默认使用项目内 smolvla-data/smolvla_ur10e",
+        default=PROJECT_ROOT / "smolvla-data" / "smolvla_ur10e_mug_v1",
+        help="包含 1 至 4 条示范的数据集目录，默认使用项目内 smolvla-data/smolvla_ur10e_mug_v1",
     )
     parser.add_argument(
         "--output-dir",

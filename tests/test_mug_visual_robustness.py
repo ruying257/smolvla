@@ -48,6 +48,8 @@ def sample_settings() -> dict:
         "policy_seeds": [20260],
         "appearance_variants": ["original", "green_white"],
         "pixel_perturbations": {"brightness": [0.5, 0.9], "gamma": [0.6, 1.4]},
+        "lighting_presets": {},
+        "holdout_presets": [],
         "collapse_baseline_drop_pp": 20,
     }
 
@@ -174,14 +176,36 @@ class ConfigAndConditionTests(unittest.TestCase):
         keys = [condition.key for condition in conditions]
         self.assertEqual(len(keys), len(set(keys)))
 
+    def test_build_conditions_includes_lighting_cross_product(self) -> None:
+        """配置光照预设后应生成外观×预设全交叉条件并映射为显式参数。"""
+        settings = sample_settings()
+        settings["lighting_presets"] = {
+            "default": {"a_scale": 1.0, "b_azimuth_deg": 0.0, "c_scale": 1.0},
+            "alt": {"a_scale": 1.4, "b_azimuth_deg": 25.0, "c_scale": 1.2},
+            "holdout_1": {"a_scale": 1.2, "b_azimuth_deg": 15.0, "c_scale": 1.1},
+        }
+        settings["holdout_presets"] = ["holdout_1"]
+        conditions = build_conditions(settings)
+        combos = [c for c in conditions if c.perturbation is None]
+        self.assertEqual(len(combos), 2 * 2 * (2 * 3))
+        for condition in combos:
+            self.assertEqual(condition.lighting_params, settings["lighting_presets"][condition.lighting_preset])
+            if condition.lighting_preset == "alt":
+                self.assertEqual(condition.lighting_params["a_scale"], 1.4)
+                self.assertEqual(condition.lighting_params["b_azimuth_deg"], 25.0)
+        presets_seen = {c.lighting_preset for c in combos}
+        self.assertEqual(presets_seen, {"default", "alt", "holdout_1"})
+        keys = [condition.key for condition in conditions]
+        self.assertEqual(len(keys), len(set(keys)))
+
     def test_condition_key_distinguishes_appearance_and_pixel(self) -> None:
-        """外观与像素条件键必须互不冲突。"""
+        """外观×光照与像素条件键必须互不冲突。"""
         appearance = RobustnessCondition(1, "mug_on_blue", 20260, appearance_variant="original")
         pixel = RobustnessCondition(
             1, "mug_on_blue", 20260, perturbation=PerturbationSpec("brightness", 0.9)
         )
         self.assertNotEqual(appearance.key, pixel.key)
-        self.assertIn("appearance=original", appearance.key)
+        self.assertIn("app=original|light=default", appearance.key)
         self.assertIn("pert=brightness-0.9", pixel.key)
 
     def test_condition_artifact_subdir_uses_parameter_hierarchy(self) -> None:
@@ -195,7 +219,9 @@ class ConfigAndConditionTests(unittest.TestCase):
             20260,
             perturbation=PerturbationSpec("gaussian_noise", 15.0),
         )
-        self.assertEqual(condition_artifact_subdir(appearance), Path("appearance/green_white"))
+        self.assertEqual(
+            condition_artifact_subdir(appearance), Path("appearance/green_white/default")
+        )
         self.assertEqual(condition_artifact_subdir(pixel), Path("pixel/gaussian_noise/15"))
         self.assertEqual(format_intensity_component(0.5), "0.5")
 

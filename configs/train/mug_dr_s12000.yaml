@@ -1,0 +1,31 @@
+# 环境级域随机化训练：从 s12000 在 DR 数据集（smolvla_ur10e_mug_dr）上训练 6000 步。
+#
+# 数据集：smolvla_ur10e_mug_dr = 40 条原版（干净锚点）+ 40 条组合变体（纹理×光照，
+# 5 组合循环，光照只用 default/alt 两类固定预设），由 scripts/domain_randomize_dataset.py
+# 重放重渲染生成（物理轨迹与源一致，偏差 ~0）。单数据集内按帧均匀采样 ≈ 50% 干净 / 50% DR，
+# 锚点持续监督，抑制灾难性遗忘/遗忘震荡。
+#
+# 机制：--policy.path 加载 s12000 权重（LR 重启）。steps=6000 触发调度器自动缩放
+# warmup 200 → peak 1e-4 → 2.5e-6@6000（≈2.4 epoch：19,700 帧 / batch 8 ≈ 2460 步每 epoch）。
+# 若干净门（(original, default) ≥ max(0.6, s12000干净-0.1)）失败，可用
+# train.scheduler_peak_lr（如 3e-5）降低重启学习率以抑制遗忘震荡。
+policy:
+  model_id: /workspace/smolvla/outputs/train/smolvla_ur10e_mug_v1_b8_s12000/checkpoints/last/pretrained_model
+  device: cuda
+  use_amp: true
+  empty_cameras: 1
+
+dataset:
+  repo_id: smolvla_ur10e_mug_dr
+  video_backend: pyav
+
+train:
+  output_dir: outputs/train/smolvla_ur10e_mug_v1_dr_b8_s18000
+  job_name: smolvla_ur10e_mug_v1_dr_b8_s18000
+  seed: 1000
+  batch_size: 8
+  steps: 6000
+  num_workers: 2
+  log_freq: 20
+  save_freq: 1000
+  # scheduler_peak_lr: 3e-5   # 可选：遗忘震荡回退杠杆（默认不启用）

@@ -228,7 +228,7 @@ bash scripts/check_server_environment.sh --output server_report.txt
 bash scripts/smoke_test.sh
 
 # 配置驱动训练
-bash scripts/train.sh --config configs/cloud_train.yaml
+bash scripts/train.sh --config configs/train/mug_b8_s8000.yaml
 ```
 
 ### Windows 评测环境

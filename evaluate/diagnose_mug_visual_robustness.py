@@ -74,6 +74,10 @@ PERTURBATION_LABELS = {
     "gaussian_blur": "Gaussian blur sigma",
     "jpeg": "JPEG quality",
 }
+# 环境级光照扰动：固定预设（default 基准 + alt 训练预设 + holdout 仅评测预设）。
+# 评测矩阵 = appearance_variants × lighting_presets 全交叉；holdout_presets 只用于
+# 评测（不参与训练），验证未见光照泛化。
+LIGHTING_PRESET_KEYS = {"a_scale", "b_azimuth_deg", "c_scale"}
 RESULTS_JSONL = "rollouts.jsonl"
 MANIFEST_JSON = "run_manifest.json"
 AGGREGATE_CSV = "robustness_aggregate.csv"
@@ -104,21 +108,28 @@ class RobustnessCondition:
     scene_seed: int
     task_id: str
     policy_seed: int
-    appearance_variant: str | None = None
+    appearance_variant: str = "original"
+    lighting_preset: str = "default"
+    lighting_params: dict[str, float] | None = None
     perturbation: PerturbationSpec | None = None
 
     @property
     def key(self) -> str:
-        if self.appearance_variant is not None:
+        if self.perturbation is not None:
             return (
                 f"scene={self.scene_seed}|task={self.task_id}|"
-                f"appearance={self.appearance_variant}|policy={self.policy_seed}"
+                f"pert={self.perturbation.label}|policy={self.policy_seed}"
             )
-        assert self.perturbation is not None
         return (
             f"scene={self.scene_seed}|task={self.task_id}|"
-            f"pert={self.perturbation.label}|policy={self.policy_seed}"
+            f"app={self.appearance_variant}|light={self.lighting_preset}|"
+            f"policy={self.policy_seed}"
         )
+
+    @property
+    def is_holdout(self) -> bool:
+        """该条件是否使用 holdout 光照预设（由外层预设集合判定，默认 False）。"""
+        return False
 
 
 def format_intensity_component(intensity: float) -> str:
@@ -128,14 +139,13 @@ def format_intensity_component(intensity: float) -> str:
 
 def condition_artifact_subdir(condition: RobustnessCondition) -> Path:
     """返回视觉条件对应的视频和动作日志相对子目录。"""
-    if condition.appearance_variant is not None:
-        return Path("appearance") / condition.appearance_variant
-    assert condition.perturbation is not None
-    return (
-        Path("pixel")
-        / condition.perturbation.name
-        / format_intensity_component(condition.perturbation.intensity)
-    )
+    if condition.perturbation is not None:
+        return (
+            Path("pixel")
+            / condition.perturbation.name
+            / format_intensity_component(condition.perturbation.intensity)
+        )
+    return Path("appearance") / condition.appearance_variant / condition.lighting_preset
 
 
 # ---------------------------------------------------------------------------
@@ -292,6 +302,8 @@ def parse_config(config: dict[str, Any]) -> dict[str, Any]:
     policy_seeds = [int(value) for value in section.get("policy_seeds", [])]
     appearance_variants = [str(value) for value in section.get("appearance_variants", [])]
     raw_pixel = section.get("pixel_perturbations", {})
+    raw_lighting = section.get("lighting_presets", {})
+    raw_holdout = section.get("holdout_presets", [])
     fps = int(section.get("fps", 20))
     max_steps = int(section.get("max_steps", 360))
     drop_pp = float(section.get("collapse_baseline_drop_pp", 20))
@@ -304,19 +316,35 @@ def parse_config(config: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("杯子鲁棒性评测只支持canonical措辞")
     if policy_seeds != [20260]:
         raise ValueError("本工具锁定policy_seed=20260以隔离扰动变量")
-    if not isinstance(raw_pixel, dict) or not raw_pixel:
-        raise ValueError("pixel_perturbations必须是非空映射")
-    unknown = set(raw_pixel) - set(PIXEL_PERTURBATIONS)
-    if unknown:
-        raise ValueError(f"未知像素扰动维度: {sorted(unknown)}")
     pixel_perturbations: dict[str, list[float]] = {}
-    for name, intensities in raw_pixel.items():
-        values = [float(value) for value in intensities]
-        if not values or len(values) != len(set(values)):
-            raise ValueError(f"扰动{name}的强度必须非空且不重复")
-        if not np.isfinite(values).all():
-            raise ValueError(f"扰动{name}的强度必须为有限数")
-        pixel_perturbations[name] = values
+    if raw_pixel:
+        if not isinstance(raw_pixel, dict):
+            raise ValueError("pixel_perturbations必须是映射")
+        unknown = set(raw_pixel) - set(PIXEL_PERTURBATIONS)
+        if unknown:
+            raise ValueError(f"未知像素扰动维度: {sorted(unknown)}")
+        for name, intensities in raw_pixel.items():
+            values = [float(value) for value in intensities]
+            if not values or len(values) != len(set(values)):
+                raise ValueError(f"扰动{name}的强度必须非空且不重复")
+            if not np.isfinite(values).all():
+                raise ValueError(f"扰动{name}的强度必须为有限数")
+            pixel_perturbations[name] = values
+    lighting_presets: dict[str, dict[str, float]] = {}
+    if raw_lighting:
+        if not isinstance(raw_lighting, dict):
+            raise ValueError("lighting_presets必须是映射")
+        for name, params in raw_lighting.items():
+            if not isinstance(params, dict) or set(params) != LIGHTING_PRESET_KEYS:
+                raise ValueError(f"光照预设{name!r}必须含a_scale/b_azimuth_deg/c_scale")
+            values = {key: float(value) for key, value in params.items()}
+            if not all(np.isfinite(value) for value in values.values()):
+                raise ValueError(f"光照预设{name!r}参数必须为有限数")
+            lighting_presets[name] = values
+    holdout_presets = [str(name) for name in raw_holdout]
+    unknown_holdout = set(holdout_presets) - set(lighting_presets)
+    if unknown_holdout:
+        raise ValueError(f"holdout_presets引用未知预设: {sorted(unknown_holdout)}")
     if fps <= 0 or max_steps <= 0:
         raise ValueError("fps和max_steps必须大于零")
     if not np.isfinite(drop_pp) or not 0.0 <= drop_pp <= 100.0:
@@ -332,25 +360,34 @@ def parse_config(config: dict[str, Any]) -> dict[str, Any]:
         "policy_seeds": policy_seeds,
         "appearance_variants": appearance_variants,
         "pixel_perturbations": pixel_perturbations,
+        "lighting_presets": lighting_presets,
+        "holdout_presets": holdout_presets,
         "collapse_baseline_drop_pp": drop_pp,
     }
 
 
 def build_conditions(settings: dict[str, Any]) -> list[RobustnessCondition]:
-    """按外观变体 + 像素扰动枚举完整评测矩阵。"""
+    """按外观变体×光照预设全交叉 + 像素扰动枚举完整评测矩阵。"""
     conditions: list[RobustnessCondition] = []
+    lighting_presets = settings.get("lighting_presets", {})
+    presets = list(lighting_presets) or ["default"]
     for scene_seed in settings["scene_seeds"]:
         for task_id in settings["task_ids"]:
             for policy_seed in settings["policy_seeds"]:
                 for variant in settings["appearance_variants"]:
-                    conditions.append(
-                        RobustnessCondition(
-                            scene_seed=scene_seed,
-                            task_id=task_id,
-                            policy_seed=policy_seed,
-                            appearance_variant=variant,
+                    for preset in presets:
+                        conditions.append(
+                            RobustnessCondition(
+                                scene_seed=scene_seed,
+                                task_id=task_id,
+                                policy_seed=policy_seed,
+                                appearance_variant=variant,
+                                lighting_preset=preset,
+                                lighting_params=dict(lighting_presets[preset])
+                                if preset in lighting_presets
+                                else None,
+                            )
                         )
-                    )
                 for name, intensities in settings["pixel_perturbations"].items():
                     for intensity in intensities:
                         conditions.append(
@@ -475,8 +512,8 @@ def run_diagnostic(
             for name, intensities in pixel_perturbations.items()
             if name in perturbation_filter
         }
-    if not pixel_perturbations and skip_appearance:
-        raise ValueError("同时跳过外观与像素扰动时没有可评测条件")
+    if not pixel_perturbations and skip_appearance and not settings["lighting_presets"]:
+        raise ValueError("同时跳过外观与像素扰动且无光照预设时没有可评测条件")
 
     settings_effective = dict(settings)
     settings_effective["pixel_perturbations"] = pixel_perturbations
@@ -519,6 +556,8 @@ def run_diagnostic(
             name: intensities for name, intensities in pixel_perturbations.items()
         },
         "pixel_perturbation_audits": pixel_audits,
+        "lighting_presets": settings["lighting_presets"],
+        "holdout_presets": settings["holdout_presets"],
         "fps": settings["fps"],
         "max_steps": settings["max_steps"],
         "execution_horizon": EXECUTION_HORIZON,
@@ -552,36 +591,19 @@ def run_diagnostic(
                 # 同一 scene/task/policy 下多个扰动条件共用默认 artifact_stem，
                 # 必须用条件专属前缀覆盖，避免视频/动作日志互相覆盖。
                 # 后缀只取扰动维度（含 | 的 condition.key 不能用于文件名）。
-                if condition.appearance_variant is not None:
-                    suffix = f"appearance_{condition.appearance_variant}"
-                else:
-                    assert condition.perturbation is not None
+                if condition.perturbation is not None:
                     suffix = (
                         f"pert_{condition.perturbation.name}_"
                         f"{condition.perturbation.intensity}"
                     )
+                else:
+                    suffix = (
+                        f"app_{condition.appearance_variant}_"
+                        f"light_{condition.lighting_preset}"
+                    )
                 artifact_stem_override = f"{rollout_artifact_stem(spec)}__{suffix}"
                 artifact_subdir_override = condition_artifact_subdir(condition)
-                if condition.appearance_variant is not None:
-                    result = run_single_rollout(
-                        policy,
-                        preprocessor,
-                        postprocessor,
-                        spec,
-                        output_dir,
-                        settings["fps"],
-                        settings["max_steps"],
-                        device,
-                        checkpoint_sha256,
-                        execution_horizon=EXECUTION_HORIZON,
-                        environment="mug",
-                        appearance_variant=condition.appearance_variant,
-                        stage_detection_settings=stage_detection,
-                        artifact_stem_override=artifact_stem_override,
-                        artifact_subdir_override=artifact_subdir_override,
-                    )
-                else:
-                    assert condition.perturbation is not None
+                if condition.perturbation is not None:
                     result = run_single_rollout(
                         policy,
                         preprocessor,
@@ -600,9 +622,30 @@ def run_diagnostic(
                         artifact_stem_override=artifact_stem_override,
                         artifact_subdir_override=artifact_subdir_override,
                     )
+                else:
+                    result = run_single_rollout(
+                        policy,
+                        preprocessor,
+                        postprocessor,
+                        spec,
+                        output_dir,
+                        settings["fps"],
+                        settings["max_steps"],
+                        device,
+                        checkpoint_sha256,
+                        execution_horizon=EXECUTION_HORIZON,
+                        environment="mug",
+                        appearance_variant=condition.appearance_variant,
+                        lighting=condition.lighting_params,
+                        stage_detection_settings=stage_detection,
+                        artifact_stem_override=artifact_stem_override,
+                        artifact_subdir_override=artifact_subdir_override,
+                    )
                 tagged = asdict(result)
                 tagged["condition_key"] = condition.key
                 tagged["appearance_variant"] = condition.appearance_variant
+                tagged["lighting_preset"] = condition.lighting_preset
+                tagged["holdout"] = condition.lighting_preset in settings["holdout_presets"]
                 tagged["perturbation_name"] = (
                     condition.perturbation.name if condition.perturbation is not None else None
                 )
@@ -680,6 +723,8 @@ def build_summary(
                 "scene_seed": record.get("scene_seed"),
                 "task_id": record.get("task_id"),
                 "appearance_variant": record.get("appearance_variant"),
+                "lighting_preset": record.get("lighting_preset"),
+                "holdout": bool(record.get("holdout", False)),
                 "perturbation_name": record.get("perturbation_name"),
                 "perturbation_intensity": record.get("perturbation_intensity"),
                 "success": bool(record.get("success")),
@@ -689,9 +734,12 @@ def build_summary(
             }
         )
 
-    # 基线：外观 original（无像素扰动）的全部记录。
+    # 基线：外观 original + 光照 default（无像素扰动）的全部记录。
     baseline_records = [
-        record for record in records if record.get("appearance_variant") == "original"
+        record
+        for record in records
+        if record.get("appearance_variant") == "original"
+        and record.get("lighting_preset") in (None, "default")
     ]
     baseline_rate = success_rate(baseline_records)
     baseline_ci = [0.0, 0.0]
@@ -701,25 +749,43 @@ def build_summary(
         )
 
     aggregate_rows: list[dict[str, Any]] = []
-    # 外观变体行：每个变体一组。
+    # 外观×光照组合行：每个 (变体, 预设) 一组；相对基线标记崩溃。
+    combo_collapse: dict[str, str] = {}
     for variant in settings["appearance_variants"]:
-        group = [record for record in records if record.get("appearance_variant") == variant]
-        if not group:
-            continue
-        rate = success_rate(group)
-        ci = bootstrap_success_ci([_record_to_result(record) for record in group])
-        aggregate_rows.append(
-            {
-                "perturbation": "appearance",
-                "intensity": variant,
-                "successes": sum(1 for record in group if record.get("success")),
-                "rollouts": len(group),
-                "success_rate": rate,
-                "ci_low": ci[0],
-                "ci_high": ci[1],
-                "collapsed": "baseline" if variant == "original" else "",
-            }
-        )
+        presets = list(settings["lighting_presets"]) or ["default"]
+        for preset in presets:
+            group = [
+                record
+                for record in records
+                if record.get("appearance_variant") == variant
+                and record.get("lighting_preset") in (None, preset)
+            ]
+            if not group:
+                continue
+            rate = success_rate(group)
+            ci = bootstrap_success_ci([_record_to_result(record) for record in group])
+            label = f"{variant}@{preset}"
+            collapsed = ""
+            if not (variant == "original" and preset == "default"):
+                threshold = max(0.5, baseline_rate - settings["collapse_baseline_drop_pp"] / 100.0)
+                if rate < threshold:
+                    collapsed = "yes"
+                    combo_collapse[label] = (
+                        f"below max(0.5, baseline-{settings['collapse_baseline_drop_pp']:.0f}pp)"
+                    )
+            aggregate_rows.append(
+                {
+                    "perturbation": "appearance",
+                    "intensity": label,
+                    "successes": sum(1 for record in group if record.get("success")),
+                    "rollouts": len(group),
+                    "success_rate": rate,
+                    "ci_low": ci[0],
+                    "ci_high": ci[1],
+                    "collapsed": "baseline" if label == "original@default" else collapsed,
+                    "holdout": preset in settings["holdout_presets"],
+                }
+            )
 
     # 像素扰动行：每个维度按强度升序一组。
     pixel_collapse: dict[str, Any] = {}
@@ -770,8 +836,12 @@ def build_summary(
     # 阶段摘要：读取每条 action_trace 的最高直接阶段（可选，失败时忽略）。
     stage_summary: dict[str, dict[str, int]] = {}
     for record in records:
-        name = record.get("perturbation_name") or "appearance"
-        label = record.get("perturbation_intensity") or record.get("appearance_variant") or "original"
+        if record.get("perturbation_name") is not None:
+            name = record["perturbation_name"]
+            label = str(record["perturbation_intensity"])
+        else:
+            name = record.get("appearance_variant", "original")
+            label = str(record.get("lighting_preset", "default"))
         stage = read_highest_stage(record.get("action_trace_path"))
         bucket = stage_summary.setdefault(f"{name}-{label}", {})
         bucket[stage] = bucket.get(stage, 0) + 1
@@ -782,6 +852,7 @@ def build_summary(
         "baseline_ci_low": baseline_ci[0],
         "baseline_ci_high": baseline_ci[1],
         "pixel_collapse": pixel_collapse,
+        "combo_collapse": combo_collapse,
         "detail_rows": detail_rows,
         "aggregate_rows": aggregate_rows,
         "stage_summary": stage_summary,
@@ -887,8 +958,13 @@ def write_report(path: Path, summary: dict[str, Any]) -> None:
         lines.append("| --- | --- |")
         for name, info in summary["pixel_collapse"].items():
             lines.append(f"| {name} | {info['collapse_intensity']} |")
-    else:
-        lines.append("无像素扰动维度完成。")
+    if summary.get("combo_collapse"):
+        lines.append("| 外观@光照组合 | 崩溃说明 |")
+        lines.append("| --- | --- |")
+        for label, info in summary["combo_collapse"].items():
+            lines.append(f"| {label} | {info} |")
+    if not summary["pixel_collapse"] and not summary.get("combo_collapse"):
+        lines.append("无扰动维度完成。")
     lines.append("")
     lines.append("## 逐维度成功率（含 Bootstrap 95% CI）")
     lines.append("")

@@ -63,6 +63,7 @@ def run_single_rollout(
     execution_horizon: int = 50,
     environment: str = "cube",
     appearance_variant: str = "original",
+    lighting: dict[str, float] | None = None,
     motion_limiter_settings: dict[str, Any] | None = None,
     chunk_blend: int = 0,
     gripper_filter_settings: dict[str, Any] | None = None,
@@ -95,6 +96,8 @@ def run_single_rollout(
         execution_horizon: 每个预测chunk实际执行的步数。
         environment: ``cube``或``mug``仿真环境。
         appearance_variant: 杯子环境使用的视觉外观变体。
+        lighting: 可选显式光照参数 ``{"a_scale":..,"b_azimuth_deg":..,"c_scale":..}``；
+            为``None``时使用场景默认光照。只影响渲染，不影响物理。
         motion_limiter_settings: 已解析的限制器配置；未启用时为``None``或``enabled=false``。
         chunk_blend: 动作chunk边界插值帧数。
         gripper_filter_settings: 已解析的夹爪迟滞过滤配置。
@@ -149,6 +152,12 @@ def run_single_rollout(
             if environment == "mug"
             else CleanTabletopEnv()
         )
+        if environment == "mug" and lighting is not None:
+            env_context.set_lighting(
+                a_scale=float(lighting.get("a_scale", 1.0)),
+                b_azimuth_deg=float(lighting.get("b_azimuth_deg", 0.0)),
+                c_scale=float(lighting.get("c_scale", 1.0)),
+            )
         with env_context as env, imageio.get_writer(
             video_path,
             fps=fps,

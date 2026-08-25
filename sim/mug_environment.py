@@ -28,6 +28,18 @@ MUG_APPEARANCE_TEXTURES = {
     "green_white": Path("mug_5/visual/image0_green_white.png"),
     "changed": Path("mug_5/visual/image0_changed.png"),
 }
+
+# 环境级域随机化（光照）参数范围。
+# 场景三个光源默认值：worldbody 主光（directional，diffuse=0.7）、
+# spotlight（跟随腕部，diffuse=0.7）、headlight（相机附带，ambient=0.1）。
+# 训练按 domain_seed 在区间内连续采样；评测档位必须落在区间内（见
+# configs/eval/mug_robustness/diagnose_mug_robustness_dr.yaml）。
+LIGHTING_MAIN_DIFFUSE_BASE = 0.7  # worldbody 主光默认 diffuse
+LIGHTING_SPOT_DIFFUSE_BASE = 0.7  # spotlight 默认 diffuse
+LIGHTING_HEAD_AMBIENT_BASE = 0.1  # headlight 默认 ambient
+LIGHTING_A_SCALE_RANGE = (0.55, 1.55)  # 主光强度缩放（评测档位 0.6/0.8/1.2/1.5）
+LIGHTING_B_AZIMUTH_RANGE = (-35.0, 35.0)  # 主光方位角，度（评测档位 ±15/±30）
+LIGHTING_C_SCALE_RANGE = (0.45, 1.55)  # 环境光/背光缩放（评测档位 0.5/0.8/1.5）
 MUG_SAMPLE_X_RANGE = (0.25, 0.39)
 MUG_SAMPLE_Y_RANGE = (-0.35, 0.35)
 MUG_INITIAL_Z = 0.86
@@ -204,6 +216,7 @@ class MugTabletopEnv(CleanTabletopEnv):
         self._mug_stable_since: dict[str, float | None] = {
             task_id: None for task_id in MUG_TASK_IDS
         }
+        self._domain_summary: dict[str, float | int | str] | None = None
         self.reset(scene_seed=0)
 
     def _mug_ids(self) -> tuple[int, int]:
@@ -402,6 +415,105 @@ class MugTabletopEnv(CleanTabletopEnv):
         )
         self._mug_stable_since = {task_id: None for task_id in MUG_TASK_IDS}
         return self.scene_snapshot()
+
+    def set_domain(self, domain_seed: int) -> dict[str, float | int | str]:
+        """按 ``domain_seed`` 确定性随机化环境光照（主光强度/方位/环境光）。
+
+        环境级域随机化只改变渲染参数，不改变任何物理属性：对 MuJoCo
+        ``MjModel.light_*`` 的写入在运行时生效（无需重载模型），因此
+        杯子动力学、机器人和成功判定完全不受影响。三个维度的采样区间
+        见模块顶部 ``LIGHTING_*_RANGE`` 常量；同一 ``domain_seed`` 严格
+        复现同一组参数。纹理变体在环境构造时通过 ``appearance_variant``
+        锁定，不在此方法内切换。
+
+        Args:
+            domain_seed: 光照参数采样的确定性整数种子。
+
+        Returns:
+            domain 摘要：种子与三维光照参数（供数据元数据与评测复现）。
+
+        Raises:
+            ValueError: ``domain_seed``不是整数时抛出。
+        """
+        if isinstance(domain_seed, bool) or not isinstance(domain_seed, (int, np.integer)):
+            raise ValueError(f"domain_seed必须为整数，实际为 {domain_seed!r}")
+
+        rng = np.random.default_rng(int(domain_seed))
+        scale_a = float(rng.uniform(*LIGHTING_A_SCALE_RANGE))
+        azimuth_deg = float(rng.uniform(*LIGHTING_B_AZIMUTH_RANGE))
+        scale_c = float(rng.uniform(*LIGHTING_C_SCALE_RANGE))
+        self.set_lighting(scale_a, azimuth_deg, scale_c)
+        self._domain_summary = {
+            "domain_seed": int(domain_seed),
+            "light_A_scale": scale_a,
+            "light_B_azimuth_deg": azimuth_deg,
+            "light_C_scale": scale_c,
+        }
+        return dict(self._domain_summary)
+
+    def set_lighting(
+        self,
+        a_scale: float,
+        b_azimuth_deg: float,
+        c_scale: float,
+    ) -> None:
+        """显式设置三维光照参数（评测离散档位与训练采样共用）。
+
+        Args:
+            a_scale: 主光 diffuse 缩放（1.0 为场景默认）。
+            b_azimuth_deg: 主光方位角，度（0 为场景默认正上方）。
+            c_scale: 环境光/背光缩放（1.0 为场景默认）。
+
+        Raises:
+            RuntimeError: 场景缺少 worldbody 主光时抛出。
+        """
+        main_light_index: int | None = None
+        for index in range(self.model.nlight):
+            name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_LIGHT, index)
+            if name != "spotlight":
+                main_light_index = index
+                break
+        if main_light_index is None:
+            raise RuntimeError("杯子场景缺少 worldbody 主光")
+
+        # A：主光强度（diffuse RGB 等比缩放）。
+        self.model.light_diffuse[main_light_index] = np.full(
+            3, LIGHTING_MAIN_DIFFUSE_BASE * float(a_scale)
+        )
+        # B：主光方位（绕竖直轴旋转 direction，保持正方向向下）。
+        azimuth = np.deg2rad(float(b_azimuth_deg))
+        cosine, sine = float(np.cos(azimuth)), float(np.sin(azimuth))
+        rotation = np.asarray(
+            [
+                [cosine, -sine, 0.0],
+                [sine, cosine, 0.0],
+                [0.0, 0.0, 1.0],
+            ]
+        )
+        self.model.light_dir[main_light_index] = rotation @ np.asarray([0.0, 0.0, -1.0])
+        # C：环境光/背光（spotlight 强度 + headlight 环境光）。
+        for index in range(self.model.nlight):
+            if mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_LIGHT, index) == "spotlight":
+                self.model.light_diffuse[index] = np.full(
+                    3, LIGHTING_SPOT_DIFFUSE_BASE * float(c_scale)
+                )
+        self.model.vis.headlight.ambient = np.full(
+            3, LIGHTING_HEAD_AMBIENT_BASE * float(c_scale)
+        )
+        self._domain_summary = {
+            "domain_seed": None,
+            "light_A_scale": float(a_scale),
+            "light_B_azimuth_deg": float(b_azimuth_deg),
+            "light_C_scale": float(c_scale),
+        }
+
+    def domain_summary(self) -> dict[str, float | int | str]:
+        """返回当前环境光照 domain 摘要的防御性副本。
+
+        Returns:
+            ``set_domain`` 写入的三维光照参数与种子；未调用时为空字典。
+        """
+        return dict(self._domain_summary or {})
 
     def scene_snapshot(self) -> MugSceneSnapshot:
         """返回当前杯子场景快照的防御性副本。

@@ -1,0 +1,22 @@
+# 域随机化数据生成配置（组合变体版）。
+# 光照：2 类固定预设（default 干净锚点 / alt 明显差异），不再随机连续采样；
+#   alt 强度需 P2 目检确认与原版区分明显（可调常量）。
+# 组合变体：纹理 × 光照（不含 original+default 锚点，锚点由 include_originals 生成）。
+# 用法：python -m scripts.domain_randomize_dataset --config configs/domain_randomize.yaml
+source_root: smolvla-data/smolvla_ur10e_mug_v1
+output_root: smolvla-data/smolvla_ur10e_mug_dr
+repo_id: smolvla_ur10e_mug_dr
+dataset_version: smolvla_ur10e_mug_dr
+fps: 20
+variants_per_episode: 1
+include_originals: true
+state_tolerance: 0.02
+lighting_presets:
+  default: {a_scale: 1.0, b_azimuth_deg: 0.0, c_scale: 1.0}
+  alt:     {a_scale: 1.4, b_azimuth_deg: 25.0, c_scale: 1.2}
+variants:
+  - {texture: original,    lighting: alt}
+  - {texture: green_white, lighting: default}
+  - {texture: green_white, lighting: alt}
+  - {texture: changed,     lighting: default}
+  - {texture: changed,     lighting: alt}

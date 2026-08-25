@@ -61,8 +61,8 @@ dataset:
         kwargs: {kernel_size: 5, sigma: [0.5, 3.0]}
 
 train:
-  output_dir: outputs/train/smolvla_ur10e_mug_v1_b8_s11000_dr
-  job_name: smolvla_ur10e_mug_v1_b8_s11000_dr
+  output_dir: outputs/train/smolvla_ur10e_mug_v1_b8_s8000plus3000_dr
+  job_name: smolvla_ur10e_mug_v1_b8_s8000plus3000_dr
   seed: 1000
   batch_size: 8
   steps: 3000

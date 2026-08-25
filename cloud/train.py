@@ -17,13 +17,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dataset-root",
         type=Path,
-        default=PROJECT_ROOT / "smolvla-data" / "smolvla_ur10e_grounding_v2",
-        help="完整 LeRobot 数据集目录，默认使用项目内 smolvla-data/smolvla_ur10e_grounding_v2",
+        default=PROJECT_ROOT / "smolvla-data" / "smolvla_ur10e_mug_v1",
+        help="完整 LeRobot 数据集目录，默认使用项目内 smolvla-data/smolvla_ur10e_mug_v1",
     )
     parser.add_argument(
         "--config",
         type=Path,
-        default=PROJECT_ROOT / "configs" / "cloud_train_Tencent.yaml",
+        default=PROJECT_ROOT / "configs" / "train" / "mug_b8_s8000.yaml",
         help="训练 YAML 配置",
     )
     parser.add_argument("--output-dir", type=Path, help="覆盖配置中的训练输出目录")
@@ -51,7 +51,7 @@ def build_train_command(
     """构造不经过 shell 插值的 LeRobot 训练参数列表。
 
     Args:
-        config: ``cloud_train_Tencent.yaml`` 配置。
+        config: ``configs/train/mug_b8_s8000.yaml`` 配置。
         dataset_root: 完整 LeRobot 数据集目录。
         output_dir: 本次训练输出目录，调用前不得存在。
         job_name: LeRobot 任务名称。
@@ -88,7 +88,7 @@ def build_train_command(
         f"--policy.device={policy.get('device', 'cuda')}",
         f"--policy.use_amp={_bool_text(policy.get('use_amp', True))}",
         "--policy.push_to_hub=false",
-        f"--dataset.repo_id={dataset.get('repo_id', 'smolvla_ur10e_grounding_v2')}",
+        f"--dataset.repo_id={dataset.get('repo_id', 'smolvla_ur10e_mug_v1')}",
         f"--dataset.root={dataset_root}",
         f"--dataset.video_backend={dataset.get('video_backend', 'pyav')}",
         f"--batch_size={batch_size}",
@@ -103,6 +103,11 @@ def build_train_command(
         f"--output_dir={output_dir}",
         f"--job_name={job_name}",
     ]
+    peak_lr = train.get("scheduler_peak_lr")
+    if peak_lr is not None:
+        # 遗忘震荡回退杠杆：--policy.path LR 重启时降低 peak_lr（如 3e-5），
+        # 避免把已收敛权重强力推离盆地（配合干净锚点与干净门使用）。
+        command.append(f"--scheduler.peak_lr={float(peak_lr)}")
     _append_image_transforms_args(command, dataset)
     return command
 
@@ -149,7 +154,7 @@ def _build_resume_command(
         executable,
         "--resume=true",
         f"--config_path={train_config}",
-        f"--dataset.repo_id={dataset.get('repo_id', 'smolvla_ur10e_grounding_v2')}",
+        f"--dataset.repo_id={dataset.get('repo_id', 'smolvla_ur10e_mug_v1')}",
         f"--dataset.root={dataset_root}",
         f"--dataset.video_backend={dataset.get('video_backend', 'pyav')}",
         f"--batch_size={int(train.get('batch_size', 8))}",
@@ -254,8 +259,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
 
     train = _mapping(config, "train")
-    output_dir = resolve_path(args.output_dir or train.get("output_dir", "outputs/train/smolvla_ur10e_grounding_v2"))
-    job_name = args.job_name or str(train.get("job_name", "smolvla_ur10e_grounding_v2"))    
+    output_dir = resolve_path(args.output_dir or train.get("output_dir", "outputs/train/smolvla_ur10e_mug_v1"))
+    job_name = args.job_name or str(train.get("job_name", "smolvla_ur10e_mug_v1"))    
     if output_dir.exists() and not args.dry_run:
         raise FileExistsError(f"训练输出目录已存在，避免覆盖: {output_dir}")
 

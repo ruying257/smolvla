@@ -195,13 +195,13 @@ PY
 
   section "项目数据与关键文件"
   for relative_path in \
-    assets/mujoco/scene.xml \
+    assets/mujoco/mug_scene.xml \
     requirements-cloud.txt \
     constraints.txt \
-    configs/cloud_train.yaml \
-    smolvla-data/smolvla_ur10e/meta \
-    smolvla-data/smolvla_ur10e/data \
-    smolvla-data/smolvla_ur10e/videos; do
+    configs/train/mug_b8_s8000.yaml \
+    smolvla-data/smolvla_ur10e_mug_v1/meta \
+    smolvla-data/smolvla_ur10e_mug_v1/data \
+    smolvla-data/smolvla_ur10e_mug_v1/videos; do
     if [[ -e "${PROJECT_ROOT}/${relative_path}" ]]; then
       echo "OK: ${relative_path}"
     else
@@ -235,7 +235,7 @@ PY
     quick_check "Python" "MISSING"
     quick_check "PyTorch CUDA" "NOT CHECKED"
   fi
-  if [[ -d "${PROJECT_ROOT}/smolvla-data/smolvla_ur10e" ]]; then
+  if [[ -d "${PROJECT_ROOT}/smolvla-data/smolvla_ur10e_mug_v1" ]]; then
     quick_check "SmolVLA dataset root" "OK"
   else
     quick_check "SmolVLA dataset root" "MISSING"

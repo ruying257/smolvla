@@ -44,8 +44,8 @@ SmolVLA 云端训练与环境检查模块。本目录封装了云端 GPU 环境�
 
 主要参数：
 
-- `--dataset-root`：LeRobot 数据集目录，默认 `smolvla-data/smolvla_ur10e_grounding_v2`；
-- `--config`：训练 YAML 配置，默认 `configs/cloud_train_Tencent.yaml`；
+- `--dataset-root`：LeRobot 数据集目录，默认 `smolvla-data/smolvla_ur10e_mug_v1`；
+- `--config`：训练 YAML 配置，默认 `configs/train/mug_b8_s8000.yaml`；
 - `--output-dir` / `--job-name`：覆盖配置中的输出目录与任务名；
 - `--resume-from`：从已有训练输出的 checkpoint 目录（如 `outputs/train/xxx/checkpoints/last`）恢复训练，使用 `--resume=true` 完整恢复 step、优化器与调度器状态；与 `--smoke` 互斥；
 - `--smoke`：强制 1 step、batch=1 的 smoke 训练；
@@ -104,5 +104,5 @@ python -m cloud.train --smoke
 python -m cloud.smoke_test
 
 # 5. 从已有 checkpoint 恢复训练（与 --smoke 互斥）
-python -m cloud.train --resume-from outputs/train/smolvla_ur10e_grounding_v2/checkpoints/last
+python -m cloud.train --resume-from outputs/train/smolvla_ur10e_mug_v1_b8_s8000/checkpoints/last
 ```

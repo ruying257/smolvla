@@ -202,7 +202,7 @@ AutoDL RTX 4090使用项目独立`.venv-cloud`的上传、安装和训练命令�
 ```text
 /workspace/smolvla/
 └── smolvla-data/
-    └── smolvla_ur10e/
+    └── smolvla_ur10e_mug_v1/
         ├── meta/           # 包括collector_contract.json和LeRobot metadata
         ├── data/           # 全部Parquet
         └── videos/         # 两路相机的全部视频
@@ -256,7 +256,7 @@ bash scripts/bootstrap_cloud.sh \
 ```bash
 cd /workspace/smolvla
 bash scripts/smoke_test.sh \
-  --dataset-root smolvla-data/smolvla_ur10e \
+  --dataset-root smolvla-data/smolvla_ur10e_mug_v1 \
   --output-dir outputs/smoke
 ```
 
@@ -268,13 +268,13 @@ bash scripts/smoke_test.sh \
 
 ```bash
 bash scripts/train.sh \
-  --dataset-root smolvla-data/smolvla_ur10e \
-  --config configs/cloud_train.yaml \
-  --output-dir outputs/train/smolvla_ur10e \
+  --dataset-root smolvla-data/smolvla_ur10e_mug_v1 \
+  --config configs/train/mug_b8_s8000.yaml \
+  --output-dir outputs/train/smolvla_ur10e_mug_v1_b8_s8000 \
   --dry-run
 ```
 
-确认后移除`--dry-run`执行。训练从`lerobot/smolvla_base`初始化，输入和输出特征由数据集推断为两路相机、7维状态和7维动作，同时增加一路masked empty camera。Tesla T4配置固定为FP16 AMP和batch size 1；默认关闭WandB和Hub上传，不覆盖已有输出目录。15 GiB只保证优先验证P4 smoke链路，正式长训练如发生OOM仍需进一步冻结或改用24 GiB GPU。
+确认后移除`--dry-run`执行。训练从`lerobot/smolvla_base`初始化，输入和输出特征由数据集推断为两路相机、7维状态和7维动作，同时增加一路masked empty camera。RTX 4090 训练配置见`configs/train/mug_b8_s8000.yaml`（FP16 AMP、batch size 8、10000 steps）。
 
 ## 本机 SmolVLA 闭环评测
 

@@ -1,0 +1,35 @@
+# Mug 环境级域随机化评测配置：外观变体（3 纹理）× 光照预设全交叉。
+# 光照预设 4 个：default/alt 参与训练（configs/domain_randomize.yaml 同源参数），
+# holdout_1/holdout_2 只用于评测（不参与训练），验证未见光照泛化。
+# 不含像素扰动（已排除）。
+# 注意：执行horizon由 evaluate.diagnose_mug_visual_robustness 硬编码为 50。
+diagnostic:
+  environment: mug
+  output_dir: outputs/eval/mug_robustness_dr
+  fps: 20
+  max_steps: 360
+  scene_seeds:
+    - 2291
+    - 6705
+    - 1894
+    - 9864
+    - 8669
+  task_ids:
+    - mug_on_blue
+    - mug_on_yellow
+  prompt_type: canonical
+  policy_seeds:
+    - 20260
+  appearance_variants:
+    - original
+    - green_white
+    - changed
+  lighting_presets:
+    default:   {a_scale: 1.0, b_azimuth_deg: 0.0,  c_scale: 1.0}
+    alt:       {a_scale: 1.4, b_azimuth_deg: 25.0, c_scale: 1.2}
+    holdout_1: {a_scale: 1.2, b_azimuth_deg: 15.0, c_scale: 1.1}
+    holdout_2: {a_scale: 0.7, b_azimuth_deg: -25.0, c_scale: 0.9}
+  holdout_presets:
+    - holdout_1
+    - holdout_2
+  collapse_baseline_drop_pp: 20
