@@ -1,10 +1,18 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-08-17T15:11:17.995625+00:00",
+  "generated_at": "2026-08-26T10:11:02.305545+00:00",
   "source": "mujoco-act-robotics/mode",
-  "file_count": 95,
-  "total_bytes": 89956098,
+  "file_count": 99,
+  "total_bytes": 90098943,
   "files": [
+    {
+      "path": "cube_scene.xml",
+      "source_path": null,
+      "size": 3348,
+      "sha256": "9af63a065a9193b366bdf60adfca5d7aec1e6384ae3b7f03e8c18f01af6e216b",
+      "source_sha256": null,
+      "status": "modified"
+    },
     {
       "path": "mug_5/collision/model_normalized_collision_0.obj",
       "source_path": "mug_5/collision/model_normalized_collision_0.obj",
@@ -294,6 +302,14 @@
       "status": "copied"
     },
     {
+      "path": "mug_5/visual/holdout_color_manifest.json",
+      "source_path": null,
+      "size": 1164,
+      "sha256": "71694846ebb2585e81aae4d5d111b4e6c4cc810a1e27642ae77a191466d27c54",
+      "source_sha256": null,
+      "status": "modified"
+    },
+    {
       "path": "mug_5/visual/image0.png",
       "source_path": "mug_5/visual/image0.png",
       "size": 72339,
@@ -314,6 +330,30 @@
       "source_path": "mug_5/visual/image0.png",
       "size": 74157,
       "sha256": "51b3f8da417a1f2d617523168a8a6e84c67868835957aa67f7fd8b487de37871",
+      "source_sha256": "1db95c4b1a3659ec6d40c8e51e16dc805dd249572bf62b9642c5734d462c5bb6",
+      "status": "modified"
+    },
+    {
+      "path": "mug_5/visual/image0_holdout_gray.png",
+      "source_path": "mug_5/visual/image0.png",
+      "size": 47272,
+      "sha256": "d74f7d5b42b9020f1ab66205457dce1f1850cf8e2328eaf5c0878d0cf3a95962",
+      "source_sha256": "1db95c4b1a3659ec6d40c8e51e16dc805dd249572bf62b9642c5734d462c5bb6",
+      "status": "modified"
+    },
+    {
+      "path": "mug_5/visual/image0_holdout_orange.png",
+      "source_path": "mug_5/visual/image0.png",
+      "size": 47139,
+      "sha256": "334326c78db5562d0ca5433fd927a5d009b8710b8f8c0d1d6c89ec8633cb36f6",
+      "source_sha256": "1db95c4b1a3659ec6d40c8e51e16dc805dd249572bf62b9642c5734d462c5bb6",
+      "status": "modified"
+    },
+    {
+      "path": "mug_5/visual/image0_holdout_purple.png",
+      "source_path": "mug_5/visual/image0.png",
+      "size": 47265,
+      "sha256": "bbdbfb561a939e5e7f3852f5655e6abee7ee2cc4fe0ccc278667004356e109ee",
       "source_sha256": "1db95c4b1a3659ec6d40c8e51e16dc805dd249572bf62b9642c5734d462c5bb6",
       "status": "modified"
     },
@@ -344,8 +384,8 @@
     {
       "path": "mug_scene.xml",
       "source_path": "demo_scene.xml",
-      "size": 2540,
-      "sha256": "64ff8d64079ecb2b3d82b360fa84459e3a90e11748243562cab7216b54f0e4cd",
+      "size": 2545,
+      "sha256": "6bd3f29ab483d085ec7d8ef1ef87f887140b7cf9e7983c5e9072c24fe6630b79",
       "source_sha256": "9b38c88cadd933e160b8cb435a65da5e9f37f059900b621e8f2fe39e53e8aa97",
       "status": "modified"
     },
@@ -540,14 +580,6 @@
       "sha256": "7e584c60ba751b6572d66982adbc93923a82a85d7d3880c1242b9d4005ff4493",
       "source_sha256": "7e584c60ba751b6572d66982adbc93923a82a85d7d3880c1242b9d4005ff4493",
       "status": "copied"
-    },
-    {
-      "path": "scene.xml",
-      "source_path": "demo_scene.xml",
-      "size": 3348,
-      "sha256": "9af63a065a9193b366bdf60adfca5d7aec1e6384ae3b7f03e8c18f01af6e216b",
-      "source_sha256": "9b38c88cadd933e160b8cb435a65da5e9f37f059900b621e8f2fe39e53e8aa97",
-      "status": "modified"
     },
     {
       "path": "tabletop/mesh/light_wood_v3.png",

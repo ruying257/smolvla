@@ -13,6 +13,7 @@ SmolVLA 项目维护与验证脚本。本目录聚合三类工具：评测产物
 | `summarize_chunk_blend.py` | Python | 汇总 `--chunk-blend` 对照实验：跨 K 成功率与边界抖动指标。 |
 | `calibrate_motion_limits.py` | Python | 从 LeRobot 专家数据标定 UR10e 关节速度与加速度上限。 |
 | `generate_asset_manifest.py` | Python | 生成 ACT 场景迁移资源的 SHA-256 逐文件清单。 |
+| `generate_mug_color_holdouts.py` | Python | 确定性生成灰、紫、橙三种仅评测 Mug 纹理及 SHA 清单。 |
 | `verify_act_layout.py` | Python | 验证迁移场景与 ACT 源场景的编译后世界位姿完全一致。 |
 | `bootstrap_cloud.sh` | Bash | 创建可复现的 Ubuntu 云环境并执行 GPU/模型/EGL 预检。 |
 | `check_server_environment.sh` | Bash | 汇总新云服务器的硬件、驱动与运行依赖（只读诊断）。 |

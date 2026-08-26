@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import shutil
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,11 +25,21 @@ from evaluate.diagnose_mug_visual_robustness import (
     condition_artifact_subdir,
     format_intensity_component,
     parse_config,
+    prepare_diagnostic_output,
     stable_condition_seed,
+    validate_completed_results,
+    wilson_score_interval,
     verify_pixel_perturbation,
+    write_report,
 )
+from evaluate.common import load_yaml_config
 from evaluate.rollout import RolloutSpec
 from evaluate.rollout_robustness import run_single_rollout
+from scripts.generate_mug_color_holdouts import (
+    HOLDOUT_COLORS,
+    build_body_mask,
+    generate_holdout_textures,
+)
 
 
 def random_image(seed: int = 0) -> np.ndarray:
@@ -154,10 +166,17 @@ class ConfigAndConditionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_config({"diagnostic": settings})
 
-    def test_parse_config_rejects_non_locked_policy_seed(self) -> None:
-        """policy_seed不是20260应拒绝。"""
+    def test_parse_config_accepts_multiple_policy_seeds(self) -> None:
+        """多个非重复policy seed应合法。"""
         settings = sample_settings()
-        settings["policy_seeds"] = [1]
+        settings["policy_seeds"] = [20260, 20261]
+        parsed = parse_config({"diagnostic": settings})
+        self.assertEqual(parsed["policy_seeds"], [20260, 20261])
+
+    def test_parse_config_rejects_duplicate_policy_seed(self) -> None:
+        """重复policy seed应拒绝。"""
+        settings = sample_settings()
+        settings["policy_seeds"] = [20260, 20260]
         with self.assertRaises(ValueError):
             parse_config({"diagnostic": settings})
 
@@ -197,6 +216,52 @@ class ConfigAndConditionTests(unittest.TestCase):
         self.assertEqual(presets_seen, {"default", "alt", "holdout_1"})
         keys = [condition.key for condition in conditions]
         self.assertEqual(len(keys), len(set(keys)))
+
+    def test_explicit_appearance_conditions_avoid_cross_product(self) -> None:
+        """显式外观条件只生成列出的组合并支持多policy seed。"""
+        raw = sample_settings()
+        raw.pop("appearance_variants")
+        raw["policy_seeds"] = [20260, 20261]
+        raw["pixel_perturbations"] = {}
+        raw["lighting_presets"] = {
+            "default": {"a_scale": 1.0, "b_azimuth_deg": 0.0, "c_scale": 1.0},
+            "new_light": {"a_scale": 1.5, "b_azimuth_deg": 0.0, "c_scale": 0.55},
+        }
+        raw["appearance_conditions"] = [
+            {"variant": "original", "lighting": "default"},
+            {"variant": "holdout_gray", "lighting": "new_light"},
+        ]
+        settings = parse_config({"diagnostic": raw})
+        conditions = build_conditions(settings)
+        self.assertEqual(len(conditions), 2 * 2 * 2 * 2)
+        pairs = {(item.appearance_variant, item.lighting_preset) for item in conditions}
+        self.assertEqual(pairs, {("original", "default"), ("holdout_gray", "new_light")})
+
+    def test_explicit_and_legacy_appearance_fields_are_mutually_exclusive(self) -> None:
+        """显式组合与旧外观列表同时配置应拒绝。"""
+        raw = sample_settings()
+        raw["appearance_conditions"] = [{"variant": "original", "lighting": "default"}]
+        with self.assertRaisesRegex(ValueError, "不可同时配置"):
+            parse_config({"diagnostic": raw})
+
+    def test_official_color_ood_and_legacy_matrix_counts(self) -> None:
+        """正式新矩阵为576条，旧DR矩阵保持120条。"""
+        project_root = Path(__file__).resolve().parents[1]
+        color_config = load_yaml_config(
+            project_root / "configs/eval/mug_robustness/diagnose_mug_color_ood_dr.yaml"
+        )
+        legacy_config = load_yaml_config(
+            project_root / "configs/eval/mug_robustness/diagnose_mug_robustness_dr.yaml"
+        )
+        color_conditions = build_conditions(parse_config(color_config))
+        legacy_conditions = build_conditions(parse_config(legacy_config))
+        self.assertEqual(len(color_conditions), 576)
+        self.assertEqual(len(legacy_conditions), 120)
+        self.assertEqual(len({condition.key for condition in color_conditions}), 576)
+        training_domain_config = (
+            project_root / "configs/domain_randomize.yaml"
+        ).read_text(encoding="utf-8")
+        self.assertTrue(all(name not in training_domain_config for name in HOLDOUT_COLORS))
 
     def test_condition_key_distinguishes_appearance_and_pixel(self) -> None:
         """外观×光照与像素条件键必须互不冲突。"""
@@ -266,6 +331,12 @@ class AuditAndSummaryTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             verify_pixel_perturbation(original, original, "brightness", 0.5)
 
+    def test_wilson_interval_keeps_uncertainty_for_all_successes(self) -> None:
+        """少量全成功样本的Wilson下界不得退化为1。"""
+        low, high = wilson_score_interval(10, 10)
+        self.assertLess(low, 0.8)
+        self.assertAlmostEqual(high, 1.0)
+
     def test_collapse_threshold_finds_first_below(self) -> None:
         """崩溃阈值取首次跌破threshold的最低强度档。"""
         threshold = collapse_threshold([0.5, 0.7, 0.9], [0.9, 0.6, 0.2], baseline_rate=0.9, drop_pp=20)
@@ -301,6 +372,119 @@ class AuditAndSummaryTests(unittest.TestCase):
         self.assertAlmostEqual(brightness_rows[0]["success_rate"], 0.5)
         self.assertAlmostEqual(brightness_rows[1]["success_rate"], 0.0)
         self.assertIn("brightness", summary["pixel_collapse"])
+
+    def test_color_summary_reports_macros_gaps_breakdowns_and_failures(self) -> None:
+        """纯色实验应汇总颜色宏平均、基准差距、分组和失败索引。"""
+        pairs = [
+            ("original", "default", True),
+            ("holdout_gray", "default", True),
+            ("holdout_gray", "new_light", False),
+            ("holdout_purple", "default", True),
+            ("holdout_purple", "new_light", True),
+            ("holdout_orange", "default", False),
+            ("holdout_orange", "new_light", False),
+        ]
+        records = []
+        for index, (variant, lighting, succeeded) in enumerate(pairs, start=1):
+            record = _fake_record("appearance", variant, scene=index, success=succeeded)
+            record["lighting_preset"] = lighting
+            record["condition_key"] += f"|light={lighting}"
+            records.append(record)
+        settings = sample_settings()
+        settings["appearance_variants"] = [
+            "original",
+            "holdout_gray",
+            "holdout_purple",
+            "holdout_orange",
+        ]
+        settings["appearance_conditions"] = [
+            {"variant": variant, "lighting": lighting}
+            for variant, lighting, _ in pairs
+        ]
+        settings["lighting_presets"] = {
+            "default": {"a_scale": 1.0, "b_azimuth_deg": 0.0, "c_scale": 1.0},
+            "new_light": {"a_scale": 1.5, "b_azimuth_deg": 0.0, "c_scale": 0.55},
+        }
+        settings["pixel_perturbations"] = {}
+        settings["descriptive_only"] = True
+        summary = build_summary(records, settings)
+        color = summary["color_generalization"]
+        self.assertAlmostEqual(color["default_macro_success_rate"], 2.0 / 3.0)
+        self.assertAlmostEqual(color["new_light_macro_success_rate"], 1.0 / 3.0)
+        self.assertAlmostEqual(color["default_gap_from_baseline"], 1.0 / 3.0)
+        self.assertEqual(len(summary["failure_rows"]), 3)
+        self.assertTrue(summary["task_rows"])
+        self.assertTrue(summary["policy_seed_rows"])
+        self.assertFalse(summary["combo_collapse"])
+        with tempfile.TemporaryDirectory() as temporary:
+            report_path = Path(temporary) / "report.md"
+            write_report(report_path, summary)
+            report = report_path.read_text(encoding="utf-8")
+            self.assertIn("未见纯色泛化摘要", report)
+            self.assertIn("failed_rollouts.csv", report)
+
+
+class HoldoutTextureGenerationTests(unittest.TestCase):
+    """未见纯色纹理生成必须确定且只改变杯身掩码。"""
+
+    def test_generation_is_deterministic_and_mask_limited(self) -> None:
+        """重复生成内容一致，掩码外像素逐值不变。"""
+        from PIL import Image
+
+        project_root = Path(__file__).resolve().parents[1]
+        source_path = project_root / "assets/mujoco/mug_5/visual/image0.png"
+        with tempfile.TemporaryDirectory() as temporary:
+            visual_dir = Path(temporary)
+            shutil.copy2(source_path, visual_dir / "image0.png")
+            first = generate_holdout_textures(visual_dir)
+            second = generate_holdout_textures(visual_dir)
+            self.assertEqual(first, second)
+            source = np.asarray(Image.open(visual_dir / "image0.png").convert("RGB"))
+            mask = build_body_mask(source)
+            for variant, rgb in HOLDOUT_COLORS.items():
+                output = np.asarray(
+                    Image.open(visual_dir / f"image0_{variant}.png").convert("RGB")
+                )
+                self.assertEqual(output.shape, source.shape)
+                np.testing.assert_array_equal(output[~mask], source[~mask])
+                expected = np.broadcast_to(np.asarray(rgb, dtype=np.uint8), output[mask].shape)
+                np.testing.assert_array_equal(output[mask], expected)
+
+
+class DiagnosticResumeTests(unittest.TestCase):
+    """视觉评测断点续跑必须绑定实验身份并拒绝损坏结果。"""
+
+    def test_manifest_mismatch_is_rejected(self) -> None:
+        """同一输出目录不得混用不同条件矩阵。"""
+        manifest = {
+            "schema_version": 2,
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "conditions": ["a"],
+            "appearance_render_audits": [],
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            prepare_diagnostic_output(output, dict(manifest))
+            changed = dict(manifest)
+            changed["conditions"] = ["b"]
+            with self.assertRaisesRegex(ValueError, "manifest"):
+                prepare_diagnostic_output(output, changed)
+
+    def test_duplicate_completed_condition_is_rejected(self) -> None:
+        """重复condition_key会破坏统计，续跑前必须拒绝。"""
+        condition = RobustnessCondition(1, "mug_on_blue", 20260)
+        record = {
+            "condition_key": condition.key,
+            "checkpoint_sha256": "abc",
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            (output / "rollouts.jsonl").write_text(
+                json.dumps(record) + "\n" + json.dumps(record) + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "重复"):
+                validate_completed_results(output, [condition], "abc")
 
 
 def _fake_record(

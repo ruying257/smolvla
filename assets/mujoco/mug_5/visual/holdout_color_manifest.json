@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "purpose": "evaluation_only_unseen_mug_colors",
+  "source": {
+    "filename": "image0.png",
+    "sha256": "1db95c4b1a3659ec6d40c8e51e16dc805dd249572bf62b9642c5734d462c5bb6",
+    "mode": "RGB",
+    "size": [
+      1024,
+      1024
+    ]
+  },
+  "mask": {
+    "rule": "r>=128 and r-g>=64 and r-b>=64",
+    "changed_pixels": 638901
+  },
+  "outputs": {
+    "holdout_gray": {
+      "filename": "image0_holdout_gray.png",
+      "rgb": [
+        115,
+        115,
+        115
+      ],
+      "hex": "#737373",
+      "sha256": "d74f7d5b42b9020f1ab66205457dce1f1850cf8e2328eaf5c0878d0cf3a95962"
+    },
+    "holdout_purple": {
+      "filename": "image0_holdout_purple.png",
+      "rgb": [
+        123,
+        44,
+        191
+      ],
+      "hex": "#7B2CBF",
+      "sha256": "bbdbfb561a939e5e7f3852f5655e6abee7ee2cc4fe0ccc278667004356e109ee"
+    },
+    "holdout_orange": {
+      "filename": "image0_holdout_orange.png",
+      "rgb": [
+        230,
+        126,
+        34
+      ],
+      "hex": "#E67E22",
+      "sha256": "334326c78db5562d0ca5433fd927a5d009b8710b8f8c0d1d6c89ec8633cb36f6"
+    }
+  }
+}

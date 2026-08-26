@@ -44,6 +44,9 @@ def generate_manifest(asset_root: Path, source_root: Path, output_path: Path) ->
             "mug_scene.xml": "demo_scene.xml",
             "mug_5/model_smolvla.xml": "mug_5/model_new.xml",
             "mug_5/visual/image0_green_white.png": "mug_5/visual/image0.png",
+            "mug_5/visual/image0_holdout_gray.png": "mug_5/visual/image0.png",
+            "mug_5/visual/image0_holdout_purple.png": "mug_5/visual/image0.png",
+            "mug_5/visual/image0_holdout_orange.png": "mug_5/visual/image0.png",
         }
         source_relative_name = source_overrides.get(relative_name, relative_name)
         source_path = source_root / source_relative_name

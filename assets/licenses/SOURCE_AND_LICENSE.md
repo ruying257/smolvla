@@ -8,7 +8,7 @@
 
 主场景 `assets/mujoco/scene.xml` 以其中的 `demo_scene.xml` 为结构参考，保留机器人、桌面、相机、地面、天空盒、灯光、观察参数和世界坐标轴；删除杯子与盘子，并新增SmolVLA任务使用的红绿积木和蓝黄放置区域。
 
-并行场景 `assets/mujoco/mug_scene.xml` 复用相同的机器人、桌面、相机和背景，并从ACT参考项目完整复制 `mode/mug_5/`。复制的源文件保持逐字节一致；新增的 `mug_5/model_smolvla.xml` 只为直接展示提供安全的桌面默认位置，其视觉网格、缩放、纹理、密度、摩擦和碰撞参数均来自 `model_new.xml`。实验纹理 `mug_5/visual/image0_green_white.png` 由原始 `image0.png` 仅转换红色区域的色相得到，白色区域、黑色Logo、分辨率和纹理布局保持不变。
+并行场景 `assets/mujoco/mug_scene.xml` 复用相同的机器人、桌面、相机和背景，并从ACT参考项目完整复制 `mode/mug_5/`。复制的源文件保持逐字节一致；新增的 `mug_5/model_smolvla.xml` 只为直接展示提供安全的桌面默认位置，其视觉网格、缩放、纹理、密度、摩擦和碰撞参数均来自 `model_new.xml`。实验纹理 `mug_5/visual/image0_green_white.png` 由原始 `image0.png` 仅转换红色区域的色相得到，白色区域、黑色Logo、分辨率和纹理布局保持不变。`image0_holdout_gray.png`、`image0_holdout_purple.png`、`image0_holdout_orange.png` 同样由原始纹理确定性重着色，只用于未见纯色评测；生成参数和 SHA 见同目录 `holdout_color_manifest.json`。
 
 为支持包含中文字符的Windows项目路径，`ur10e_with_2f85_d435i.xml` 仅修正资源定位方式。机器人、夹爪、相机和桌面的位姿、尺寸、质量、惯量及控制参数未因此改变。
 

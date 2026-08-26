@@ -1,0 +1,50 @@
+# DR-s18000 未见 Mug 纯色泛化评测。
+# 只评测灰/紫/橙纯色，不用于训练；显式条件避免纹理×光照无意义全交叉。
+# 完整矩阵：16 scene × 2 task × 2 policy seed × 9 condition = 576 rollouts。
+diagnostic:
+  environment: mug
+  output_dir: outputs/eval/robustness/mug_color_ood_dr_s18000
+  fps: 20
+  max_steps: 360
+  descriptive_only: true
+  scene_seeds:
+    - 9201
+    - 3132
+    - 6943
+    - 2277
+    - 6343
+    - 6043
+    - 8846
+    - 3174
+    - 2076
+    - 5724
+    - 8320
+    - 9165
+    - 2721
+    - 9162
+    - 4175
+    - 8848
+  task_ids:
+    - mug_on_blue
+    - mug_on_yellow
+  prompt_type: canonical
+  policy_seeds:
+    - 20260
+    - 20261
+  lighting_presets:
+    default:   {a_scale: 1.0, b_azimuth_deg: 0.0, c_scale: 1.0}
+    alt:       {a_scale: 1.4, b_azimuth_deg: 25.0, c_scale: 1.2}
+    new_light: {a_scale: 1.5, b_azimuth_deg: 0.0, c_scale: 0.55}
+  holdout_presets:
+    - new_light
+  appearance_conditions:
+    - {variant: original,       lighting: default}
+    - {variant: changed,        lighting: alt}
+    - {variant: original,       lighting: new_light}
+    - {variant: holdout_gray,   lighting: default}
+    - {variant: holdout_purple, lighting: default}
+    - {variant: holdout_orange, lighting: default}
+    - {variant: holdout_gray,   lighting: new_light}
+    - {variant: holdout_purple, lighting: new_light}
+    - {variant: holdout_orange, lighting: new_light}
+  collapse_baseline_drop_pp: 20

@@ -289,6 +289,12 @@ python -m evaluate.diagnose_mug_visual_robustness `
 
 高斯噪声使用条件派生的确定性随机种子。崩溃阈值定义为成功率首次跌破 `max(0.5, baseline - 20pp)` 的配置档位，baseline 为 `original` 无扰动。
 
+未见纯色实验使用
+`configs/eval/mug_robustness/diagnose_mug_color_ood_dr.yaml`。该配置通过
+`appearance_conditions` 精确列出 9 个外观@光照组合，支持多个 policy seed；旧配置仍按
+`appearance_variants × lighting_presets` 全交叉。正式运行前用 `--max-scenes 1` 验证 36 条
+冒烟矩阵，完整协议见项目根目录的《域随机化训练思路与实验设计》。
+
 ## 5. 输出与追溯
 
 ### 5.1 标准评测产物
@@ -329,6 +335,7 @@ outputs/eval/<robustness-run>/
 ├── rollouts.jsonl
 ├── rollout_detail.csv
 ├── robustness_aggregate.csv
+├── failed_rollouts.csv
 ├── summary.json
 ├── report.md
 ├── curves/

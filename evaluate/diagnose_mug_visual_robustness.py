@@ -82,11 +82,17 @@ RESULTS_JSONL = "rollouts.jsonl"
 MANIFEST_JSON = "run_manifest.json"
 AGGREGATE_CSV = "robustness_aggregate.csv"
 DETAIL_CSV = "rollout_detail.csv"
+FAILURE_CSV = "failed_rollouts.csv"
 SUMMARY_JSON = "summary.json"
 REPORT_MD = "report.md"
 CURVE_DIR = "curves"
 EXECUTION_HORIZON = 50
 IMAGE_SHAPE = (256, 256, 3)
+COLOR_HOLDOUT_VARIANTS = (
+    "holdout_gray",
+    "holdout_purple",
+    "holdout_orange",
+)
 
 
 @dataclass(frozen=True)
@@ -300,13 +306,15 @@ def parse_config(config: dict[str, Any]) -> dict[str, Any]:
     task_ids = [str(value) for value in section.get("task_ids", [])]
     prompt_type = str(section.get("prompt_type", "canonical"))
     policy_seeds = [int(value) for value in section.get("policy_seeds", [])]
-    appearance_variants = [str(value) for value in section.get("appearance_variants", [])]
+    raw_appearance_variants = section.get("appearance_variants", [])
+    raw_appearance_conditions = section.get("appearance_conditions")
     raw_pixel = section.get("pixel_perturbations", {})
     raw_lighting = section.get("lighting_presets", {})
     raw_holdout = section.get("holdout_presets", [])
     fps = int(section.get("fps", 20))
     max_steps = int(section.get("max_steps", 360))
     drop_pp = float(section.get("collapse_baseline_drop_pp", 20))
+    descriptive_only = bool(section.get("descriptive_only", False))
 
     if not scene_seeds or len(scene_seeds) != len(set(scene_seeds)):
         raise ValueError("scene_seeds必须非空且不重复")
@@ -314,8 +322,8 @@ def parse_config(config: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("task_ids必须锁定为mug_on_blue/mug_on_yellow")
     if prompt_type != "canonical":
         raise ValueError("杯子鲁棒性评测只支持canonical措辞")
-    if policy_seeds != [20260]:
-        raise ValueError("本工具锁定policy_seed=20260以隔离扰动变量")
+    if not policy_seeds or len(policy_seeds) != len(set(policy_seeds)):
+        raise ValueError("policy_seeds必须非空且不重复")
     pixel_perturbations: dict[str, list[float]] = {}
     if raw_pixel:
         if not isinstance(raw_pixel, dict):
@@ -345,6 +353,34 @@ def parse_config(config: dict[str, Any]) -> dict[str, Any]:
     unknown_holdout = set(holdout_presets) - set(lighting_presets)
     if unknown_holdout:
         raise ValueError(f"holdout_presets引用未知预设: {sorted(unknown_holdout)}")
+    if raw_appearance_conditions is not None and "appearance_variants" in section:
+        raise ValueError("appearance_conditions与appearance_variants不可同时配置")
+
+    appearance_conditions: list[dict[str, str]] | None = None
+    if raw_appearance_conditions is not None:
+        if not isinstance(raw_appearance_conditions, list) or not raw_appearance_conditions:
+            raise ValueError("appearance_conditions必须是非空列表")
+        appearance_conditions = []
+        for item in raw_appearance_conditions:
+            if not isinstance(item, dict) or set(item) != {"variant", "lighting"}:
+                raise ValueError("appearance_conditions每项必须仅含variant/lighting")
+            variant = str(item["variant"])
+            lighting = str(item["lighting"])
+            if not variant or not lighting:
+                raise ValueError("appearance_conditions的variant/lighting不得为空")
+            if lighting not in lighting_presets:
+                raise ValueError(f"appearance_conditions引用未知光照预设: {lighting!r}")
+            appearance_conditions.append({"variant": variant, "lighting": lighting})
+        pairs = [(item["variant"], item["lighting"]) for item in appearance_conditions]
+        if len(pairs) != len(set(pairs)):
+            raise ValueError("appearance_conditions不得包含重复组合")
+        appearance_variants = list(dict.fromkeys(item["variant"] for item in appearance_conditions))
+    else:
+        if not isinstance(raw_appearance_variants, list):
+            raise ValueError("appearance_variants必须是列表")
+        appearance_variants = [str(value) for value in raw_appearance_variants]
+        if len(appearance_variants) != len(set(appearance_variants)):
+            raise ValueError("appearance_variants不得重复")
     if fps <= 0 or max_steps <= 0:
         raise ValueError("fps和max_steps必须大于零")
     if not np.isfinite(drop_pp) or not 0.0 <= drop_pp <= 100.0:
@@ -359,35 +395,49 @@ def parse_config(config: dict[str, Any]) -> dict[str, Any]:
         "prompt_type": prompt_type,
         "policy_seeds": policy_seeds,
         "appearance_variants": appearance_variants,
+        "appearance_conditions": appearance_conditions,
         "pixel_perturbations": pixel_perturbations,
         "lighting_presets": lighting_presets,
         "holdout_presets": holdout_presets,
         "collapse_baseline_drop_pp": drop_pp,
+        "descriptive_only": descriptive_only,
     }
 
 
+def appearance_pairs(settings: dict[str, Any]) -> list[tuple[str, str]]:
+    """返回配置要求执行的外观与光照组合。"""
+    explicit = settings.get("appearance_conditions")
+    if explicit is not None:
+        return [(str(item["variant"]), str(item["lighting"])) for item in explicit]
+    presets = list(settings.get("lighting_presets", {})) or ["default"]
+    return [
+        (variant, preset)
+        for variant in settings.get("appearance_variants", [])
+        for preset in presets
+    ]
+
+
 def build_conditions(settings: dict[str, Any]) -> list[RobustnessCondition]:
-    """按外观变体×光照预设全交叉 + 像素扰动枚举完整评测矩阵。"""
+    """按显式组合或旧式全交叉配置枚举完整评测矩阵。"""
     conditions: list[RobustnessCondition] = []
     lighting_presets = settings.get("lighting_presets", {})
-    presets = list(lighting_presets) or ["default"]
+    configured_pairs = appearance_pairs(settings)
     for scene_seed in settings["scene_seeds"]:
         for task_id in settings["task_ids"]:
             for policy_seed in settings["policy_seeds"]:
-                for variant in settings["appearance_variants"]:
-                    for preset in presets:
-                        conditions.append(
-                            RobustnessCondition(
-                                scene_seed=scene_seed,
-                                task_id=task_id,
-                                policy_seed=policy_seed,
-                                appearance_variant=variant,
-                                lighting_preset=preset,
-                                lighting_params=dict(lighting_presets[preset])
-                                if preset in lighting_presets
-                                else None,
-                            )
+                for variant, preset in configured_pairs:
+                    conditions.append(
+                        RobustnessCondition(
+                            scene_seed=scene_seed,
+                            task_id=task_id,
+                            policy_seed=policy_seed,
+                            appearance_variant=variant,
+                            lighting_preset=preset,
+                            lighting_params=dict(lighting_presets[preset])
+                            if preset in lighting_presets
+                            else None,
                         )
+                    )
                 for name, intensities in settings["pixel_perturbations"].items():
                     for intensity in intensities:
                         conditions.append(
@@ -451,6 +501,75 @@ def verify_appearance_variant(
     return {"texture_sha256": digests}
 
 
+def audit_appearance_rendering(
+    settings: dict[str, Any],
+    scene_seed: int,
+) -> list[dict[str, Any]]:
+    """在加载策略前审计外观条件的双相机渲染质量。
+
+    审计只使用图像格式、均值、极端像素比例和相对参考图的变化量，绝不
+    根据策略表现选择或调整颜色与光照。
+    """
+    from sim.mug_environment import MugTabletopEnv
+
+    lighting_presets = settings.get("lighting_presets", {})
+    pairs = appearance_pairs(settings)
+    required_presets = list(dict.fromkeys(preset for _, preset in pairs))
+    references: dict[str, dict[str, NDArray[np.uint8]]] = {}
+    for preset in required_presets:
+        with MugTabletopEnv(appearance_variant="original") as env:
+            if preset in lighting_presets:
+                env.set_lighting(**lighting_presets[preset])
+            env.reset(scene_seed)
+            references[preset] = env.capture_training_images()
+
+    audits: list[dict[str, Any]] = []
+    rendered_pairs: dict[tuple[str, str], dict[str, NDArray[np.uint8]]] = {}
+    for variant, preset in pairs:
+        with MugTabletopEnv(appearance_variant=variant) as env:
+            if preset in lighting_presets:
+                env.set_lighting(**lighting_presets[preset])
+            env.reset(scene_seed)
+            images = env.capture_training_images()
+        rendered_pairs[(variant, preset)] = images
+        for camera, image in images.items():
+            mean = float(image.mean())
+            clipped_fraction = float(np.mean((image <= 2) | (image >= 253)))
+            changed_fraction = float(np.mean(image != references[preset][camera]))
+            if image.shape != IMAGE_SHAPE or image.dtype != np.uint8:
+                raise RuntimeError(
+                    f"渲染审计格式错误: {variant}@{preset}/{camera}={image.shape}/{image.dtype}"
+                )
+            if not 10.0 <= mean <= 245.0 or clipped_fraction > 0.25:
+                raise RuntimeError(
+                    f"渲染审计疑似全黑/过曝: {variant}@{preset}/{camera}, "
+                    f"mean={mean:.3f}, clipped={clipped_fraction:.3f}"
+                )
+            if variant != "original" and changed_fraction <= 1e-4:
+                raise RuntimeError(f"外观未在渲染中生效: {variant}@{preset}/{camera}")
+            audits.append(
+                {
+                    "variant": variant,
+                    "lighting": preset,
+                    "camera": camera,
+                    "mean": mean,
+                    "std": float(image.std()),
+                    "clipped_fraction": clipped_fraction,
+                    "changed_fraction_vs_original_same_light": changed_fraction,
+                }
+            )
+
+    default_reference = rendered_pairs.get(("original", "default"))
+    if default_reference is not None:
+        for variant, preset in pairs:
+            if variant != "original" or preset == "default":
+                continue
+            for camera, image in rendered_pairs[(variant, preset)].items():
+                if float(np.mean(image != default_reference[camera])) <= 1e-4:
+                    raise RuntimeError(f"光照预设未在渲染中生效: {preset}/{camera}")
+    return audits
+
+
 # ---------------------------------------------------------------------------
 # 执行
 # ---------------------------------------------------------------------------
@@ -471,10 +590,58 @@ def _load_completed_keys(output_dir: Path) -> set[str]:
                 record = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            key = record.get("rollout_key") or record.get("condition_key")
+            key = record.get("condition_key") or record.get("rollout_key")
             if key:
                 keys.add(str(key))
     return keys
+
+
+def prepare_diagnostic_output(
+    output_dir: Path,
+    manifest: dict[str, Any],
+) -> None:
+    """校验新运行或断点续跑目录，并持久化严格实验身份。"""
+    manifest_path = output_dir / MANIFEST_JSON
+    results_path = output_dir / RESULTS_JSONL
+    if manifest_path.is_file():
+        try:
+            existing = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"已有manifest无法读取: {manifest_path}") from exc
+        ignored = {"created_at", "appearance_render_audits"}
+        existing_identity = {key: value for key, value in existing.items() if key not in ignored}
+        current_identity = {key: value for key, value in manifest.items() if key not in ignored}
+        if existing_identity != current_identity:
+            raise ValueError("续跑manifest与当前checkpoint、配置或条件矩阵不一致")
+        manifest["created_at"] = existing.get("created_at", manifest["created_at"])
+        manifest["appearance_render_audits"] = existing.get(
+            "appearance_render_audits", manifest["appearance_render_audits"]
+        )
+    elif results_path.exists() or any(output_dir.iterdir()):
+        raise ValueError("输出目录非空但缺少run_manifest.json，拒绝混入旧产物")
+    write_json(manifest_path, manifest)
+
+
+def validate_completed_results(
+    output_dir: Path,
+    conditions: Sequence[RobustnessCondition],
+    checkpoint_sha256: str,
+) -> set[str]:
+    """校验已有JSONL的键、checkpoint和唯一性并返回完成条件。"""
+    records = load_results_jsonl(output_dir / RESULTS_JSONL)
+    keys = [str(record.get("condition_key") or "") for record in records]
+    if any(not key for key in keys):
+        raise ValueError("已有结果缺少condition_key，无法安全续跑")
+    if len(keys) != len(set(keys)):
+        raise ValueError("已有结果包含重复condition_key，拒绝续跑")
+    expected = {condition.key for condition in conditions}
+    unknown = set(keys) - expected
+    if unknown:
+        raise ValueError(f"已有结果包含当前矩阵外条件: {sorted(unknown)[:3]}")
+    hashes = {str(record.get("checkpoint_sha256") or "") for record in records}
+    if hashes and hashes != {checkpoint_sha256}:
+        raise ValueError("已有结果checkpoint哈希与当前模型不一致")
+    return set(keys)
 
 
 def run_diagnostic(
@@ -520,12 +687,22 @@ def run_diagnostic(
     settings_effective["appearance_variants"] = (
         [] if skip_appearance else settings["appearance_variants"]
     )
+    settings_effective["appearance_conditions"] = (
+        [] if skip_appearance and settings.get("appearance_conditions") is not None
+        else settings.get("appearance_conditions")
+    )
     scene_seeds = settings["scene_seeds"][:max_scenes] if max_scenes is not None else settings["scene_seeds"]
     settings_effective["scene_seeds"] = scene_seeds
 
     conditions = build_conditions(settings_effective)
     if not conditions:
         raise ValueError("配置后没有可评测条件")
+
+    appearance_render_audits = (
+        audit_appearance_rendering(settings_effective, scene_seeds[0])
+        if not skip_appearance and appearance_pairs(settings_effective)
+        else []
+    )
 
     # 像素扰动静态有效性自检：对固定参考图验证每档强度确实改变像素。
     pixel_audits: list[dict[str, Any]] = []
@@ -538,7 +715,7 @@ def run_diagnostic(
                 pixel_audits.append(verify_pixel_perturbation(reference, perturbed, name, intensity))
 
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "checkpoint_path": str(checkpoint.resolve()),
         "checkpoint_sha256": checkpoint_sha256,
@@ -551,7 +728,9 @@ def run_diagnostic(
         "policy_seeds": settings["policy_seeds"],
         "prompt_type": settings["prompt_type"],
         "appearance_variants": settings_effective["appearance_variants"],
+        "appearance_conditions": settings_effective["appearance_conditions"],
         "appearance_texture_sha256": appearance_audit["texture_sha256"],
+        "appearance_render_audits": appearance_render_audits,
         "pixel_perturbations": {
             name: intensities for name, intensities in pixel_perturbations.items()
         },
@@ -563,9 +742,9 @@ def run_diagnostic(
         "execution_horizon": EXECUTION_HORIZON,
         "collapse_baseline_drop_pp": settings["collapse_baseline_drop_pp"],
     }
-    write_json(output_dir / MANIFEST_JSON, manifest)
+    prepare_diagnostic_output(output_dir, manifest)
 
-    completed = _load_completed_keys(output_dir)
+    completed = validate_completed_results(output_dir, conditions, checkpoint_sha256)
     pending = [condition for condition in conditions if condition.key not in completed]
     print(
         f"条件总数={len(conditions)}，已完成={len(conditions) - len(pending)}，待运行={len(pending)}",
@@ -645,7 +824,10 @@ def run_diagnostic(
                 tagged["condition_key"] = condition.key
                 tagged["appearance_variant"] = condition.appearance_variant
                 tagged["lighting_preset"] = condition.lighting_preset
-                tagged["holdout"] = condition.lighting_preset in settings["holdout_presets"]
+                tagged["holdout"] = (
+                    condition.lighting_preset in settings["holdout_presets"]
+                    or condition.appearance_variant in COLOR_HOLDOUT_VARIANTS
+                )
                 tagged["perturbation_name"] = (
                     condition.perturbation.name if condition.perturbation is not None else None
                 )
@@ -664,6 +846,7 @@ def run_diagnostic(
     write_json(output_dir / SUMMARY_JSON, summary)
     write_csv(output_dir / DETAIL_CSV, summary["detail_rows"])
     write_csv(output_dir / AGGREGATE_CSV, summary["aggregate_rows"])
+    write_csv(output_dir / FAILURE_CSV, summary["failure_rows"])
     write_report(output_dir / REPORT_MD, summary)
     write_curves(output_dir, summary)
     return summary
@@ -691,6 +874,38 @@ def load_results_jsonl(path: Path) -> list[dict[str, Any]]:
 def success_rate(results: list[dict[str, Any]]) -> float:
     """计算一组记录的成功率。"""
     return sum(1 for record in results if record.get("success")) / len(results) if results else 0.0
+
+
+def wilson_score_interval(successes: int, total: int, z: float = 1.959963984540054) -> list[float]:
+    """计算二项成功率的 Wilson 95% 区间。"""
+    if total <= 0:
+        return [0.0, 0.0]
+    proportion = successes / total
+    denominator = 1.0 + z * z / total
+    center = (proportion + z * z / (2.0 * total)) / denominator
+    radius = z * np.sqrt(
+        proportion * (1.0 - proportion) / total + z * z / (4.0 * total * total)
+    ) / denominator
+    return [float(max(0.0, center - radius)), float(min(1.0, center + radius))]
+
+
+def summarize_success_group(group: list[dict[str, Any]]) -> dict[str, Any]:
+    """汇总一组 rollout 的成功率与两类区间。"""
+    successes = sum(1 for record in group if record.get("success"))
+    total = len(group)
+    wilson = wilson_score_interval(successes, total)
+    scene_ci = [0.0, 0.0]
+    if group:
+        scene_ci = bootstrap_success_ci([_record_to_result(record) for record in group])
+    return {
+        "successes": successes,
+        "rollouts": total,
+        "success_rate": successes / total if total else 0.0,
+        "wilson_ci_low": wilson[0],
+        "wilson_ci_high": wilson[1],
+        "scene_bootstrap_ci_low": scene_ci[0],
+        "scene_bootstrap_ci_high": scene_ci[1],
+    }
 
 
 def collapse_threshold(
@@ -741,19 +956,13 @@ def build_summary(
         if record.get("appearance_variant") == "original"
         and record.get("lighting_preset") in (None, "default")
     ]
-    baseline_rate = success_rate(baseline_records)
-    baseline_ci = [0.0, 0.0]
-    if baseline_records:
-        baseline_ci = bootstrap_success_ci(
-            [_record_to_result(record) for record in baseline_records]
-        )
+    baseline_stats = summarize_success_group(baseline_records)
+    baseline_rate = float(baseline_stats["success_rate"])
 
     aggregate_rows: list[dict[str, Any]] = []
     # 外观×光照组合行：每个 (变体, 预设) 一组；相对基线标记崩溃。
     combo_collapse: dict[str, str] = {}
-    for variant in settings["appearance_variants"]:
-        presets = list(settings["lighting_presets"]) or ["default"]
-        for preset in presets:
+    for variant, preset in appearance_pairs(settings):
             group = [
                 record
                 for record in records
@@ -762,11 +971,13 @@ def build_summary(
             ]
             if not group:
                 continue
-            rate = success_rate(group)
-            ci = bootstrap_success_ci([_record_to_result(record) for record in group])
+            stats = summarize_success_group(group)
+            rate = float(stats["success_rate"])
             label = f"{variant}@{preset}"
             collapsed = ""
-            if not (variant == "original" and preset == "default"):
+            if not settings.get("descriptive_only", False) and not (
+                variant == "original" and preset == "default"
+            ):
                 threshold = max(0.5, baseline_rate - settings["collapse_baseline_drop_pp"] / 100.0)
                 if rate < threshold:
                     collapsed = "yes"
@@ -777,13 +988,18 @@ def build_summary(
                 {
                     "perturbation": "appearance",
                     "intensity": label,
-                    "successes": sum(1 for record in group if record.get("success")),
-                    "rollouts": len(group),
+                    "successes": stats["successes"],
+                    "rollouts": stats["rollouts"],
                     "success_rate": rate,
-                    "ci_low": ci[0],
-                    "ci_high": ci[1],
+                    "ci_low": stats["scene_bootstrap_ci_low"],
+                    "ci_high": stats["scene_bootstrap_ci_high"],
+                    "wilson_ci_low": stats["wilson_ci_low"],
+                    "wilson_ci_high": stats["wilson_ci_high"],
                     "collapsed": "baseline" if label == "original@default" else collapsed,
-                    "holdout": preset in settings["holdout_presets"],
+                    "holdout": (
+                        preset in settings["holdout_presets"]
+                        or variant in COLOR_HOLDOUT_VARIANTS
+                    ),
                 }
             )
 
@@ -801,19 +1017,22 @@ def build_summary(
             ]
             if not group:
                 continue
-            rate = success_rate(group)
-            ci = bootstrap_success_ci([_record_to_result(record) for record in group])
+            stats = summarize_success_group(group)
+            rate = float(stats["success_rate"])
             group_rates.append(rate)
             aggregate_rows.append(
                 {
                     "perturbation": name,
                     "intensity": float(intensity),
-                    "successes": sum(1 for record in group if record.get("success")),
-                    "rollouts": len(group),
+                    "successes": stats["successes"],
+                    "rollouts": stats["rollouts"],
                     "success_rate": rate,
-                    "ci_low": ci[0],
-                    "ci_high": ci[1],
+                    "ci_low": stats["scene_bootstrap_ci_low"],
+                    "ci_high": stats["scene_bootstrap_ci_high"],
+                    "wilson_ci_low": stats["wilson_ci_low"],
+                    "wilson_ci_high": stats["wilson_ci_high"],
                     "collapsed": "",
+                    "holdout": False,
                 }
             )
         if group_rates:
@@ -835,6 +1054,8 @@ def build_summary(
 
     # 阶段摘要：读取每条 action_trace 的最高直接阶段（可选，失败时忽略）。
     stage_summary: dict[str, dict[str, int]] = {}
+    failure_stage_summary: dict[str, dict[str, int]] = {}
+    failure_rows: list[dict[str, Any]] = []
     for record in records:
         if record.get("perturbation_name") is not None:
             name = record["perturbation_name"]
@@ -845,17 +1066,115 @@ def build_summary(
         stage = read_highest_stage(record.get("action_trace_path"))
         bucket = stage_summary.setdefault(f"{name}-{label}", {})
         bucket[stage] = bucket.get(stage, 0) + 1
+        if not record.get("success"):
+            failure_bucket = failure_stage_summary.setdefault(f"{name}-{label}", {})
+            failure_bucket[stage] = failure_bucket.get(stage, 0) + 1
+            failure_rows.append(
+                {
+                    "condition_key": record.get("condition_key") or record.get("rollout_key"),
+                    "scene_seed": record.get("scene_seed"),
+                    "task_id": record.get("task_id"),
+                    "policy_seed": record.get("policy_seed"),
+                    "appearance_variant": record.get("appearance_variant"),
+                    "lighting_preset": record.get("lighting_preset"),
+                    "failure_mode": record.get("failure_mode"),
+                    "highest_direct_stage": stage,
+                    "video_path": record.get("video_path"),
+                    "video_retained": bool(record.get("video_retained", False)),
+                }
+            )
+
+    appearance_records = [
+        record for record in records if record.get("perturbation_name") is None
+    ]
+    task_rows: list[dict[str, Any]] = []
+    policy_seed_rows: list[dict[str, Any]] = []
+    for variant, preset in appearance_pairs(settings):
+        condition_group = [
+            record
+            for record in appearance_records
+            if record.get("appearance_variant") == variant
+            and record.get("lighting_preset") in (None, preset)
+        ]
+        for task_id in settings["task_ids"]:
+            group = [record for record in condition_group if record.get("task_id") == task_id]
+            if group:
+                task_rows.append(
+                    {"condition": f"{variant}@{preset}", "task_id": task_id, **summarize_success_group(group)}
+                )
+        for policy_seed in settings["policy_seeds"]:
+            group = [
+                record for record in condition_group if int(record.get("policy_seed")) == policy_seed
+            ]
+            if group:
+                policy_seed_rows.append(
+                    {
+                        "condition": f"{variant}@{preset}",
+                        "policy_seed": policy_seed,
+                        **summarize_success_group(group),
+                    }
+                )
+
+    per_color: dict[str, dict[str, Any]] = {}
+    for variant in COLOR_HOLDOUT_VARIANTS:
+        per_color[variant] = {}
+        for preset in ("default", "new_light"):
+            group = [
+                record
+                for record in appearance_records
+                if record.get("appearance_variant") == variant
+                and record.get("lighting_preset") == preset
+            ]
+            if group:
+                per_color[variant][preset] = summarize_success_group(group)
+        if "default" in per_color[variant] and "new_light" in per_color[variant]:
+            per_color[variant]["new_light_drop"] = (
+                per_color[variant]["default"]["success_rate"]
+                - per_color[variant]["new_light"]["success_rate"]
+            )
+
+    default_rates = [
+        float(values["default"]["success_rate"])
+        for values in per_color.values()
+        if "default" in values
+    ]
+    new_light_rates = [
+        float(values["new_light"]["success_rate"])
+        for values in per_color.values()
+        if "new_light" in values
+    ]
+    default_macro = float(np.mean(default_rates)) if default_rates else None
+    new_light_macro = float(np.mean(new_light_rates)) if new_light_rates else None
+    color_generalization = {
+        "per_color": per_color,
+        "default_macro_success_rate": default_macro,
+        "new_light_macro_success_rate": new_light_macro,
+        "default_gap_from_baseline": (
+            baseline_rate - default_macro if default_macro is not None else None
+        ),
+        "new_light_gap_from_baseline": (
+            baseline_rate - new_light_macro if new_light_macro is not None else None
+        ),
+    }
 
     return {
         "condition_count": len(records),
         "baseline_rate": baseline_rate,
-        "baseline_ci_low": baseline_ci[0],
-        "baseline_ci_high": baseline_ci[1],
+        "baseline_ci_low": baseline_stats["scene_bootstrap_ci_low"],
+        "baseline_ci_high": baseline_stats["scene_bootstrap_ci_high"],
+        "baseline_wilson_ci_low": baseline_stats["wilson_ci_low"],
+        "baseline_wilson_ci_high": baseline_stats["wilson_ci_high"],
         "pixel_collapse": pixel_collapse,
         "combo_collapse": combo_collapse,
         "detail_rows": detail_rows,
         "aggregate_rows": aggregate_rows,
         "stage_summary": stage_summary,
+        "failure_stage_summary": failure_stage_summary,
+        "failure_rows": failure_rows,
+        "task_rows": task_rows,
+        "policy_seed_rows": policy_seed_rows,
+        "color_generalization": color_generalization,
+        "descriptive_only": bool(settings.get("descriptive_only", False)),
     }
 
 
@@ -947,37 +1266,90 @@ def write_report(path: Path, summary: dict[str, Any]) -> None:
     lines.append("")
     lines.append(f"- 完成条件数：`{summary['condition_count']}`")
     lines.append(f"- 基线（original 无扰动）成功率：`{summary['baseline_rate']:.3f}` "
-                 f"(95% CI [{summary['baseline_ci_low']:.3f}, {summary['baseline_ci_high']:.3f}])")
+                 f"(场景 Bootstrap 95% CI [{summary['baseline_ci_low']:.3f}, "
+                 f"{summary['baseline_ci_high']:.3f}]；Wilson 95% CI "
+                 f"[{summary['baseline_wilson_ci_low']:.3f}, "
+                 f"{summary['baseline_wilson_ci_high']:.3f}])")
+    if not summary.get("descriptive_only", False):
+        lines.append("")
+        lines.append("## 崩溃阈值")
+        lines.append("")
+        lines.append("阈值规则：成功率首次跌破 `max(0.5, baseline - drop_pp)` 的最低强度档。")
+        lines.append("")
+        if summary["pixel_collapse"]:
+            lines.append("| 扰动维度 | 崩溃强度 |")
+            lines.append("| --- | --- |")
+            for name, info in summary["pixel_collapse"].items():
+                lines.append(f"| {name} | {info['collapse_intensity']} |")
+        if summary.get("combo_collapse"):
+            lines.append("| 外观@光照组合 | 崩溃说明 |")
+            lines.append("| --- | --- |")
+            for label, info in summary["combo_collapse"].items():
+                lines.append(f"| {label} | {info} |")
+        if not summary["pixel_collapse"] and not summary.get("combo_collapse"):
+            lines.append("无扰动维度完成。")
     lines.append("")
-    lines.append("## 崩溃阈值")
+    lines.append("## 逐条件成功率")
     lines.append("")
-    lines.append("阈值规则：成功率首次跌破 `max(0.5, baseline - drop_pp)` 的最低强度档。")
-    lines.append("")
-    if summary["pixel_collapse"]:
-        lines.append("| 扰动维度 | 崩溃强度 |")
-        lines.append("| --- | --- |")
-        for name, info in summary["pixel_collapse"].items():
-            lines.append(f"| {name} | {info['collapse_intensity']} |")
-    if summary.get("combo_collapse"):
-        lines.append("| 外观@光照组合 | 崩溃说明 |")
-        lines.append("| --- | --- |")
-        for label, info in summary["combo_collapse"].items():
-            lines.append(f"| {label} | {info} |")
-    if not summary["pixel_collapse"] and not summary.get("combo_collapse"):
-        lines.append("无扰动维度完成。")
-    lines.append("")
-    lines.append("## 逐维度成功率（含 Bootstrap 95% CI）")
-    lines.append("")
-    lines.append("| 扰动 | 强度 | 成功数 | 总数 | 成功率 | CI 低 | CI 高 | 崩溃 |")
-    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
+    lines.append("| 扰动 | 条件 | 成功数 | 总数 | 成功率 | Wilson 95% CI | 场景 Bootstrap 95% CI |")
+    lines.append("| --- | --- | --- | --- | --- | --- | --- |")
     for row in summary["aggregate_rows"]:
         lines.append(
             f"| {row['perturbation']} | {row['intensity']} | {row['successes']} "
-            f"| {row['rollouts']} | {row['success_rate']:.3f} | {row['ci_low']:.3f} "
-            f"| {row['ci_high']:.3f} | {row['collapsed']} |"
+            f"| {row['rollouts']} | {row['success_rate']:.3f} "
+            f"| [{row['wilson_ci_low']:.3f}, {row['wilson_ci_high']:.3f}] "
+            f"| [{row['ci_low']:.3f}, {row['ci_high']:.3f}] |"
+        )
+
+    color = summary.get("color_generalization", {})
+    if color.get("default_macro_success_rate") is not None:
+        lines.append("")
+        lines.append("## 未见纯色泛化摘要")
+        lines.append("")
+        lines.append(
+            f"- 默认光照三颜色宏平均：`{color['default_macro_success_rate']:.3f}`；"
+            f"相对干净基准差距：`{color['default_gap_from_baseline']:.3f}`"
+        )
+        if color.get("new_light_macro_success_rate") is not None:
+            lines.append(
+                f"- 新光照三颜色宏平均：`{color['new_light_macro_success_rate']:.3f}`；"
+                f"相对干净基准差距：`{color['new_light_gap_from_baseline']:.3f}`"
+            )
+        lines.append("")
+        lines.append("| 未见颜色 | 默认光照 | 新光照 | 新光照下降 |")
+        lines.append("| --- | --- | --- | --- |")
+        for variant, values in color["per_color"].items():
+            default_rate = values.get("default", {}).get("success_rate")
+            new_rate = values.get("new_light", {}).get("success_rate")
+            drop = values.get("new_light_drop")
+            lines.append(
+                f"| {variant} | {default_rate:.3f} | {new_rate:.3f} | {drop:.3f} |"
+            )
+
+    lines.append("")
+    lines.append("## 按任务与 Policy Seed 分组")
+    lines.append("")
+    lines.append("### 任务")
+    lines.append("")
+    lines.append("| 条件 | 任务 | 成功数/总数 | 成功率 |")
+    lines.append("| --- | --- | --- | --- |")
+    for row in summary.get("task_rows", []):
+        lines.append(
+            f"| {row['condition']} | {row['task_id']} | {row['successes']}/{row['rollouts']} "
+            f"| {row['success_rate']:.3f} |"
         )
     lines.append("")
-    lines.append("## 失败阶段分布（highest_direct_stage）")
+    lines.append("### Policy Seed")
+    lines.append("")
+    lines.append("| 条件 | Policy Seed | 成功数/总数 | 成功率 |")
+    lines.append("| --- | --- | --- | --- |")
+    for row in summary.get("policy_seed_rows", []):
+        lines.append(
+            f"| {row['condition']} | {row['policy_seed']} | {row['successes']}/{row['rollouts']} "
+            f"| {row['success_rate']:.3f} |"
+        )
+    lines.append("")
+    lines.append("## 全部 Rollout 最高阶段（highest_direct_stage）")
     lines.append("")
     if summary["stage_summary"]:
         lines.append("| 条件 | S1 | S2 | S3 | S4 | S5 | none |")
@@ -991,6 +1363,34 @@ def write_report(path: Path, summary: dict[str, Any]) -> None:
             )
     else:
         lines.append("无阶段数据。")
+    lines.append("")
+    lines.append("## 失败 Rollout 阶段分布")
+    lines.append("")
+    if summary.get("failure_stage_summary"):
+        lines.append("| 条件 | S1 | S2 | S3 | S4 | S5 | none |")
+        lines.append("| --- | --- | --- | --- | --- | --- | --- |")
+        for label in sorted(summary["failure_stage_summary"]):
+            counts = summary["failure_stage_summary"][label]
+            lines.append(
+                f"| {label} | {counts.get('S1', 0)} | {counts.get('S2', 0)} "
+                f"| {counts.get('S3', 0)} | {counts.get('S4', 0)} | {counts.get('S5', 0)} "
+                f"| {counts.get('none', 0)} |"
+            )
+    else:
+        lines.append("无失败 rollout。")
+    lines.append("")
+    lines.append("## 失败视频索引")
+    lines.append("")
+    lines.append(
+        f"失败 rollout 共 `{len(summary.get('failure_rows', []))}` 条，完整路径见 `failed_rollouts.csv`。"
+    )
+    lines.append("")
+    lines.append("## 结论边界")
+    lines.append("")
+    lines.append(
+        "本报告只描述该 checkpoint 对灰、紫、橙三种预留纯色及新光照组合的表现；"
+        "不据此声称 DR 相对未微调模型带来因果提升，也不外推到复杂材质或 sim2real。"
+    )
     lines.append("")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines), encoding="utf-8")

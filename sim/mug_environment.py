@@ -27,6 +27,10 @@ MUG_APPEARANCE_TEXTURES = {
     "original": Path(MUG_TEXTURE_ASSET_KEY),
     "green_white": Path("mug_5/visual/image0_green_white.png"),
     "changed": Path("mug_5/visual/image0_changed.png"),
+    # 仅用于未见纯色泛化评测，不得加入训练数据配置。
+    "holdout_gray": Path("mug_5/visual/image0_holdout_gray.png"),
+    "holdout_purple": Path("mug_5/visual/image0_holdout_purple.png"),
+    "holdout_orange": Path("mug_5/visual/image0_holdout_orange.png"),
 }
 
 # 环境级域随机化（光照）参数范围。
@@ -89,7 +93,7 @@ def resolve_mug_texture_path(asset_root: Path, appearance_variant: str) -> Path:
 
     Args:
         asset_root: 包含杯子资源的MuJoCo资源根目录。
-        appearance_variant: ``original``或``green_white``。
+        appearance_variant: ``MUG_APPEARANCE_TEXTURES`` 中注册的外观名称。
 
     Returns:
         已确认存在的纹理绝对路径。
@@ -187,7 +191,7 @@ class MugTabletopEnv(CleanTabletopEnv):
         Args:
             project_root: SmolVLA项目根目录；为空时使用 ``sim`` 的父目录。
             image_size: 固定相机输出的 ``(宽, 高)``。
-            appearance_variant: ``original``或``green_white``。
+            appearance_variant: ``MUG_APPEARANCE_TEXTURES`` 中注册的外观名称。
 
         Raises:
             FileNotFoundError: 杯子场景XML不存在时抛出。
@@ -461,7 +465,8 @@ class MugTabletopEnv(CleanTabletopEnv):
 
         Args:
             a_scale: 主光 diffuse 缩放（1.0 为场景默认）。
-            b_azimuth_deg: 主光方位角，度（0 为场景默认正上方）。
+            b_azimuth_deg: 主光方位角元数据，度。当前主光严格竖直向下，
+                绕竖直轴旋转不会改变实际方向；实验不得把它作为有效扰动轴。
             c_scale: 环境光/背光缩放（1.0 为场景默认）。
 
         Raises:

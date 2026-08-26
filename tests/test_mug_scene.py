@@ -270,6 +270,36 @@ class MugTabletopEnvTest(unittest.TestCase):
                 100,
             )
 
+    def test_holdout_colors_change_render_only(self) -> None:
+        """灰紫橙holdout纹理应改变渲染但保持物理模型与状态一致。"""
+        seed = 9201
+        self.env.reset(seed)
+        original_images = self.env.capture_training_images()
+        original_state = self.env.get_state()
+        physical_attributes = (
+            "body_mass",
+            "body_inertia",
+            "geom_friction",
+            "geom_size",
+            "mesh_scale",
+            "actuator_ctrlrange",
+        )
+        for variant in ("holdout_gray", "holdout_purple", "holdout_orange"):
+            with self.subTest(variant=variant), MugTabletopEnv(appearance_variant=variant) as env:
+                env.reset(seed)
+                images = env.capture_training_images()
+                np.testing.assert_allclose(env.get_state(), original_state)
+                for attribute in physical_attributes:
+                    np.testing.assert_allclose(
+                        getattr(env.model, attribute),
+                        getattr(self.env.model, attribute),
+                    )
+                for camera in ("agent", "wrist"):
+                    self.assertGreater(
+                        int(np.count_nonzero(images[camera] != original_images[camera])),
+                        100,
+                    )
+
     def test_unknown_appearance_variant_is_rejected(self) -> None:
         """未知杯子外观变体必须明确报错。"""
         with self.assertRaisesRegex(ValueError, "未知杯子外观变体"):
