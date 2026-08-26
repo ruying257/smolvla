@@ -52,6 +52,7 @@ from evaluate.rollout import (
     update_manifest_identity,
 )
 from scripts.calibrate_motion_limits import calibrate
+from scripts.compare_control_stack import compare_runs, paired_scene_bootstrap_ci
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -175,6 +176,32 @@ class EvaluationContractTests(unittest.TestCase):
         self.assertEqual({spec.scene_seed for spec in specs}, {2291, 6705})
         self.assertEqual(evaluation["appearance_variant"], "green_white")
         self.assertEqual(evaluation["execution_horizon"], 25)
+
+    def test_s12000_control_stack_configs_share_the_same_120_rollouts(self) -> None:
+        """s12000基线与联合控制组必须只在输出目录和limiter设置上不同。"""
+        config_dir = PROJECT_ROOT / "configs" / "eval"
+        baseline = load_yaml_config(
+            config_dir / "mug_v1_s12000_unseen_multiseed_baseline.yaml"
+        )["evaluation"]
+        controlled = load_yaml_config(
+            config_dir / "mug_v1_s12000_unseen_multiseed_k4_limiter.yaml"
+        )["evaluation"]
+        baseline_specs = build_specs(baseline)
+        controlled_specs = build_specs(controlled)
+        self.assertEqual(baseline_specs, controlled_specs)
+        self.assertEqual(len(baseline_specs), 120)
+        self.assertEqual(len({spec.key for spec in baseline_specs}), 120)
+        self.assertEqual(len({spec.scene_seed for spec in baseline_specs}), 20)
+        self.assertEqual({spec.policy_seed for spec in baseline_specs}, {20260, 20261, 20262})
+        self.assertEqual({spec.task_id for spec in baseline_specs}, {"mug_on_blue", "mug_on_yellow"})
+        self.assertEqual(baseline["execution_horizon"], 25)
+        self.assertEqual(baseline["max_steps"], 360)
+        self.assertFalse(baseline["motion_limiter"]["enabled"])
+        self.assertTrue(controlled["motion_limiter"]["enabled"])
+        self.assertEqual(
+            controlled["motion_limiter"]["limits_path"],
+            "configs/motion_limits/mug_v1_p99x1.1.json",
+        )
 
     def test_h20_motion_limiter_configs_share_the_same_matrix(self) -> None:
         """h20基线与限制器必须只在motion_limiter和输出目录上不同。"""
@@ -839,6 +866,102 @@ class ResumeAndStatisticsTests(unittest.TestCase):
             manifest = {"checkpoint_path": "checkpoint"}
             write_results(output, [result], manifest)
             for filename in ("rollouts.csv", "summary.json", "report.md"):
+                self.assertGreater((output / filename).stat().st_size, 0)
+
+
+class ControlStackComparisonTests(unittest.TestCase):
+    """验证s12000双组结果的严格配对与统计产物。"""
+
+    @staticmethod
+    def _write_fake_run(
+        run_dir: Path,
+        successes: list[bool],
+        chunk_blend: int,
+        limiter_enabled: bool,
+    ) -> None:
+        """写入最小但完整的配对分析输入。"""
+        run_dir.mkdir()
+        keys = []
+        rows = []
+        conditions = [(1, 10), (1, 11), (2, 10), (2, 11)]
+        for (scene_seed, policy_seed), success in zip(conditions, successes):
+            key = f"scene={scene_seed}|task=mug_on_blue|prompt=canonical|policy={policy_seed}"
+            keys.append(key)
+            rows.append(
+                {
+                    "rollout_key": key,
+                    "scene_seed": scene_seed,
+                    "policy_seed": policy_seed,
+                    "task_id": "mug_on_blue",
+                    "prompt_type": "canonical",
+                    "success": success,
+                    "failure_mode": "success" if success else "timeout",
+                    "steps": 200 if success else 360,
+                    "checkpoint_sha256": "a" * 64,
+                    "action_trace_path": "",
+                    "error": "",
+                }
+            )
+        manifest = {
+            "checkpoint_sha256": "a" * 64,
+            "source_sha256": "b" * 64,
+            "fps": 20,
+            "max_steps": 360,
+            "chunk_size": 50,
+            "execution_horizon": 25,
+            "appearance_variant": "original",
+            "appearance_texture_sha256": "c" * 64,
+            "chunk_blend": chunk_blend,
+            "motion_limiter": {"enabled": limiter_enabled},
+            "rollout_count": 4,
+            "rollout_keys": keys,
+        }
+        (run_dir / "run_manifest.json").write_text(
+            json.dumps(manifest),
+            encoding="utf-8",
+        )
+        with (run_dir / "rollouts.csv").open("w", encoding="utf-8-sig", newline="") as file:
+            writer = csv.DictWriter(file, fieldnames=list(rows[0]))
+            writer.writeheader()
+            writer.writerows(rows)
+
+    def test_paired_scene_bootstrap_is_deterministic(self) -> None:
+        """配对Bootstrap应固定随机种子并保留scene聚类。"""
+        pairs = [
+            {"scene_seed": 1, "baseline_success": False, "controlled_success": True},
+            {"scene_seed": 1, "baseline_success": True, "controlled_success": True},
+            {"scene_seed": 2, "baseline_success": True, "controlled_success": False},
+            {"scene_seed": 2, "baseline_success": False, "controlled_success": False},
+        ]
+        first = paired_scene_bootstrap_ci(pairs, repeats=200, bootstrap_seed=7)
+        second = paired_scene_bootstrap_ci(pairs, repeats=200, bootstrap_seed=7)
+        self.assertEqual(first, second)
+        self.assertLessEqual(first[0], 0.0)
+        self.assertGreaterEqual(first[1], 0.0)
+
+    def test_compare_runs_writes_paired_artifacts(self) -> None:
+        """完整比较应输出四类转移、JSON、CSV和中文报告。"""
+        with workspace_temp_dir() as root:
+            baseline = root / "baseline"
+            controlled = root / "controlled"
+            output = root / "comparison"
+            self._write_fake_run(baseline, [False, True, False, True], 0, False)
+            self._write_fake_run(controlled, [True, True, False, False], 4, True)
+            summary = compare_runs(
+                baseline,
+                controlled,
+                output,
+                expected_pairs=4,
+                repeats=200,
+                bootstrap_seed=7,
+            )
+            self.assertEqual(summary["pairs"], 4)
+            self.assertEqual(summary["paired_comparison"]["success_rate_delta"], 0.0)
+            self.assertEqual(
+                summary["paired_comparison"]["transitions"],
+                {"improved": 1, "regressed": 1, "both_success": 1, "both_failure": 1},
+            )
+            for filename in ("paired_rollouts.csv", "comparison_summary.json", "comparison_report.md"):
                 self.assertGreater((output / filename).stat().st_size, 0)
 
 

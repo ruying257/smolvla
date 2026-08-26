@@ -1,0 +1,41 @@
+# s12000未见场景多policy seed联合控制组：K4、p99×1.1 motion limiter。
+# K4由评测命令显式传入--chunk-blend 4；YAML负责锁定motion limiter。
+evaluation:
+  environment: mug
+  output_dir: outputs/eval/s12000_unseen_multiseed_k4_limiter
+  fps: 20
+  max_steps: 360
+  execution_horizon: 25
+  motion_limiter:
+    enabled: true
+    limits_path: configs/motion_limits/mug_v1_p99x1.1.json
+  scene_seeds:
+    - 9201
+    - 3132
+    - 6943
+    - 2277
+    - 6343
+    - 6043
+    - 8846
+    - 3174
+    - 2076
+    - 5724
+    - 8320
+    - 9165
+    - 2721
+    - 9162
+    - 4175
+    - 8848
+    - 7149
+    - 7586
+    - 1323
+    - 8780
+  task_ids:
+    - mug_on_blue
+    - mug_on_yellow
+  prompt_types:
+    - canonical
+  policy_seeds:
+    - 20260
+    - 20261
+    - 20262

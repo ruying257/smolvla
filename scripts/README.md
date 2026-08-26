@@ -9,6 +9,7 @@ SmolVLA 项目维护与验证脚本。本目录聚合三类工具：评测产物
 | `__init__.py` | Python | 包初始化文件，声明本模块为「SmolVLA 项目维护与验证脚本」。 |
 | `analyze_chunk_boundary_jitter.py` | Python | 从已有 action_traces 量化 chunk 边界对轨迹抖动的影响。 |
 | `analyze_multi_seed.py` | Python | 多 policy_seed 评测结果的跨 seed 聚合与 Bootstrap 置信区间分析。 |
+| `compare_control_stack.py` | Python | 按 rollout key 配对比较 K0 基线与 K4+limiter 联合控制组。 |
 | `summarize_chunk_blend.py` | Python | 汇总 `--chunk-blend` 对照实验：跨 K 成功率与边界抖动指标。 |
 | `calibrate_motion_limits.py` | Python | 从 LeRobot 专家数据标定 UR10e 关节速度与加速度上限。 |
 | `generate_asset_manifest.py` | Python | 生成 ACT 场景迁移资源的 SHA-256 逐文件清单。 |
@@ -191,6 +192,9 @@ python -m scripts.analyze_chunk_boundary_jitter
 
 # 多 seed 聚合与 Bootstrap 置信区间
 python -m scripts.analyze_multi_seed --input outputs/eval/formal_020000_multiseed
+
+# 比较s12000基线与联合控制组
+python -m scripts.compare_control_stack --baseline outputs/eval/s12000_unseen_multiseed_baseline --controlled outputs/eval/s12000_unseen_multiseed_k4_limiter --output outputs/eval/s12000_control_stack_comparison
 
 # chunk-blend 对照实验汇总
 python -m scripts.summarize_chunk_blend
