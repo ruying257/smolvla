@@ -1,310 +1,208 @@
-# SmolVLA UR10e MuJoCo 数据采集项目
+# SmolVLA：UR10e 语言条件机器人操作的 MuJoCo 仿真闭环
 
-本项目以 ACT 的 `mode/demo_scene.xml`、键盘控制和数据采集流程为参考，在项目内独立提供 UR10e 双积木语言任务环境、20 Hz专家采集和LeRobot v3数据回放。原积木场景不包含杯盘；项目另行提供一个互不影响的单杯子双放置区场景。两个场景运行时都不依赖ACT项目路径。
+>  **VLA（Vision-Language-Action）模型工程化闭环** ：从仿真环境与数据采集，到云端微调 SmolVLA 动作专家，再到执行层轨迹优化与统计严谨的闭环评测。所有结论均来自固定实验矩阵上的定量指标。
 
-## 场景布局
+## 核心指标速览
 
-- 机械臂基座：`[1.0, 0.0, 0.8]`
-- 桌面body：`[0.0, 0.0, 0.0]`
-- 桌面geom中心：`[0.5, 0.0, 0.4]`
-- 桌面半尺寸：`[1.0, 0.7, 0.4]`，上表面高度为 `0.8 m`
-- 机械臂初始关节角：`[0°, -90°, 90°, -90°, -90°, 90°]`
-- 蓝色区域：`[0.55, -0.22, 0.8005]`
-- 黄色区域：`[0.55, 0.22, 0.8005]`
-
-两个积木边长均为 `0.05 m`、质量均为 `0.05 kg`，并具有自由关节。每次 `reset(scene_seed)` 只随机积木的平面位置：`x=[0.25,0.42]`、`y=[-0.35,0.35]`，中心距离至少 `0.12 m`；同一seed严格复现。放置区域完整尺寸为 `0.16 × 0.12 × 0.002 m`，位置固定且只用于半透明视觉提示。
-
-严格成功要求指定积木完整进入目标区域内缩5毫米后的范围、连续稳定0.5秒且夹爪已经释放。错误积木、错误区域、掉落越界、超时和控制异常分别分类。
-
-## 环境准备
-
-推荐从项目环境定义创建或更新采集环境。FFmpeg是LeRobot视频编码的必需依赖：
-
-```powershell
-conda env create -f environment-collector.yml
-conda activate smolvla-collector
-```
-
-已有环境可执行：
-
-```powershell
-conda install -n smolvla-collector -c conda-forge ffmpeg
-conda activate smolvla-collector
-python -m pip install -r requirements-collector.txt
-```
-
-本机环境包含MuJoCo、LeRobot 0.4.4、OpenCV、PyAV和FFmpeg，不安装SmolVLA训练侧依赖。
-
-## 打开场景
-
-```powershell
-python view_scene.py
-```
-
-主视角以及 `agentview`、`d435i_rgb`、`sideview` 三路固定相机均由MuJoCo直接渲染到同一GLFW窗口，不创建OpenCV窗口。关闭Viewer后程序正常退出。
-
-短时GUI冒烟测试：
-
-```powershell
-python view_scene.py --max-seconds 5
-```
-
-只显示主视角：
-
-```powershell
-python view_scene.py --no-camera-panel
-```
-
-指定可复现积木布局：
-
-```powershell
-python view_scene.py --scene-seed 7
-```
-
-## 独立杯子场景
-
-杯子场景与原双积木场景并行存在，不修改原 `scene.xml`、`CleanTabletopEnv`、采集器或评测器。杯子使用ACT `mug_5/model_new.xml` 的视觉网格、纹理和32个碰撞网格，蓝黄放置区域的位置、尺寸及颜色与积木场景一致。
-
-杯子场景使用已有的 `smolvla-collector-clean` 环境：
-
-```powershell
-conda activate smolvla-collector-clean
-python view_mug_scene.py
-```
-
-指定可复现的杯子布局：
-
-```powershell
-python view_mug_scene.py --scene-seed 7
-```
-
-执行无窗口检查：
-
-```powershell
-python view_mug_scene.py --headless --steps 10 --scene-seed 7
-```
-
-杯子按seed在 `x=[0.25,0.39]`、`y=[-0.35,0.35]` 内随机生成，从 `z=0.86` 落下并自动稳定250个物理步。新核心环境支持 `mug_on_blue` 和 `mug_on_yellow` 两个任务；成功要求杯子中心进入目标区内缩1厘米后的边界、保持直立稳定0.5秒并松开夹爪。V3采用20个共享scene、蓝黄canonical配对和20 Hz确定性动作回放验收，完整命令见[杯子V3数据采集与验收](Mug_v3数据采集与验收.md)。
-
-## 采集专家数据
-
-颜色Grounding v2采用20个全共享scene、四任务canonical反事实配对和逐scene
-Latin square采集，不再用下面的v1单任务追加命令。完整pilot、恢复、局部重采、
-蒙太奇复核及最终验收命令见[Grounding v2数据采集与验收](Grounding_v2数据采集与验收.md)。
-
-原80条数据集在本机保留为 `smolvla-data/smolvla_ur10e_v1`，其内部
-`repo_id=smolvla_ur10e` 和 `dataset_version=smolvla_ur10e_v1` 不变。
-
-### v1旧采集入口
-
-采集一条红积木到蓝色区域的episode：
-
-```powershell
-python -m collector.v1.collect `
-  --root smolvla-data\smolvla_ur10e_v1 `
-  --task red_on_blue `
-  --seed 0 `
-  --episodes 1
-```
-
-对已有数据集显式续采，并循环使用指定seed：
-
-```powershell
-python -m collector.v1.collect `
-  --root smolvla-data\smolvla_ur10e_v1 `
-  --task green_on_yellow `
-  --seeds 3,7,11 `
-  --episodes 3 `
-  --resume
-```
-
-控制键：
-
-| 按键 | 功能 |
+| 指标 | 数值 |
 | --- | --- |
-| `W/S`、`A/D`、`R/F` | 末端前后、左右、上下平移 |
-| 方向键、`Q/E` | 末端旋转 |
-| 空格 | 切换夹爪开合 |
-| `Z` | 取消当前episode并使用同一seed重试 |
-| `Enter` | 严格成功后确认保存 |
-| `Backspace` | 严格成功后丢弃并使用同一seed重试 |
-| `Esc` | 退出采集器；未确认缓冲不会保存 |
+| 未见场景严格成功率 | **96.67%**（20 未见场景 × 2 任务 × 3 policy seed = 120 条 rollout） |
+| 成功率 95% 置信区间（Scene 分层 Bootstrap，B=10000） | **[93.33%, 99.17%]** |
+| 执行层优化：末端 Jerk P95 | **42.76 → 29.98 m/s³（↓ 29.9%）** |
+| 执行层优化：Chunk 边界跳变 P95 | **0.02262 → 0.01430 rad（↓ 36.8%）** |
+| 执行层优化：边界方向翻转率 | **9.55% → 0** |
+| DR 模型：原始外观成功率 | **92.2%**（默认光照与未见光照均为 59/64） |
+| DR 模型：未见颜色宏平均成功率 | **60.4% / 59.9%**（默认光照 / 未见光照） |
 
-首次有效操作自动开始录制。控制与数据固定为20 Hz，Viewer保持60 Hz。每类任务的两种训练措辞由采集器按已保存数量自动均衡；未见措辞不会写入训练集。
+**技术栈**：Python · PyTorch 2.7 · HuggingFace LeRobot 0.4.4 · SmolVLA（Flow Matching 动作生成）· MuJoCo 3.6
 
-## 回放数据
+---
 
-回放第0条episode：
+## 流水线总览
 
-```powershell
-python -m collector.v1.replay --root smolvla-data\smolvla_ur10e_v1 --episode-index 0
+```mermaid
+flowchart LR
+    A["MuJoCo 专家示教<br/>LeRobot 数据集"] --> B["SmolVLA 动作专家微调<br/>原始域 + 随机化域数据"]
+    B --> C["执行层轨迹优化<br/>ChunkBlend + 运动限制器"]
+    C --> D["闭环评测与诊断<br/>Bootstrap + 失败归因"]
 ```
 
-回放窗口同步显示第三方和腕部视频，以及任务、seed、7维状态和7维动作。空格暂停，左右方向键逐帧，`Q`或`Esc`退出；回放不会创建MuJoCo环境。
+本文按这 4 个阶段展开，其中 **执行层轨迹优化** 与 **评测与诊断** 是本项目的核心亮点。
 
-## Headless检查
+---
 
-```powershell
-python view_scene.py --headless --steps 10 --scene-seed 9
-```
+## 阶段一：数据采集（Data Collection）
 
-输出包含模型规模、机器人与桌面布局、四个任务元素的状态，以及三路 `256×256×3 uint8` 图像摘要。加入两个free joint后，模型规模应为 `nq=28`、`nv=26`、`nu=7`。
+**解决的问题**：VLA 策略的质量上限由数据决定，而「评测能不能信」由数据契约与成功口径决定。
 
-## 自动验证
+- 在 MuJoCo 中构建 UR10e + Robotiq 2F85 仿真环境：第三视角 + 腕部两路 RGB 相机（256×256），物体布局由 `scene_seed` 完全可复现；
+- 20 Hz 键盘遥操作采集（IK 末端增量控制 → 7 维绝对关节目标动作），动作/观测契约固定：6 关节角 + 1 夹爪指令；
+- **严格成功判定**：目标物中心进入目标区内缩边界、保持直立稳定 0.5 秒、夹爪已释放——口径先于评测定义，杜绝「宽松判定刷成功率」；
+- 产出 LeRobot v3 格式数据集（40 条 mug 专家数据：20 共享场景 × 2 任务 `mug_on_blue` / `mug_on_yellow`），元数据完整记录 scene seed 与初始位姿。
 
-```powershell
-python -m unittest discover -s tests -v
-python -m scripts.verify_act_layout `
-  --source-root ..\code_learn\mujoco-act-robotics\mode
-```
+![四条不同场景与任务的专家示范数据同步回放](assets/readme/expert_episodes.gif)
 
-位姿验证器只读取ACT的 `demo_scene.xml`，在内存中删除杯盘并修复资源路径，不修改参考项目。机器人基座、桌面和四路模型相机的世界位姿及视场角误差上限为 `1e-9`。
+> 四条专家 episode 的第三视角同步回放，覆盖不同场景布局以及蓝色、黄色两类语言目标；按轨迹进度对齐，以 2 倍速播放。
 
-## 资源说明
+---
 
-- `assets/mujoco/`：项目独立运行所需的XML、mesh和纹理。
-- `assets/licenses/SOURCE_AND_LICENSE.md`：资源来源和许可证说明。
-- `assets/licenses/asset_manifest.json`：逐文件大小、SHA-256和复制状态。
-- `sim/`：相互独立的积木/杯子环境、严格成功判定及MuJoCo内部多相机Viewer。
-- `collector/`：IK遥操作、采集状态机、LeRobot写入和视频回放。
-- `scripts/`：资源清单和ACT位姿等价性验证。
-- `tests/`：模型、任务物体、稳定性、相机和注释回归测试。
+## 阶段二：模型训练（Training）
 
-所有路径均由项目文件位置推导，不引用ACT项目的运行时路径，也没有符号链接。
+**解决的问题**：让预训练 VLA 适配 UR10e 的具体操作技能，而不是从零训练大模型。
 
-## 云端 SmolVLA 训练（P4）
+- 从 HuggingFace `lerobot/smolvla_base` 初始化，保留预训练视觉语言表征，**仅微调动作专家（Action Expert）**；
+- 输入：两路 256×256 图像 + 7 维当前状态 + 英文指令；输出：7 维绝对关节目标动作（50 步 Action Chunk）；
+- 在 RTX 4090 上将主任务模型训练至 s12000（batch 8，FP16 AMP），checkpoint 完整保存模型配置、权重与策略前后处理器。
 
-当前云端支持Ubuntu 22.04/24.04和Python 3.10/3.11；原始smoke目标为Tesla T4 15 GiB，AutoDL正式训练使用RTX 4090 24GB。依赖锁定为PyTorch 2.7.0/cu126、torchvision 0.22.0、TorchCodec 0.5.0、LeRobot 0.4.4和MuJoCo 3.6.0。云端只负责环境检查与训练；训练完成后的checkpoint下载到本笔记本评测。
+### 2.1 环境级域随机化训练
 
-AutoDL RTX 4090使用项目独立`.venv-cloud`的上传、安装和训练命令见[AutoDL独立cu126环境部署](AUTODL独立环境部署.md)。该方案不复用镜像预装的PyTorch/cu130。
+逐帧像素增强难以保证双相机与时间序列的一致性。本项目利用 `scene_seed` 和绝对关节目标动作确定性重放已验证的专家轨迹，仅改变纹理与光照后重新渲染，在不重新遥操作的情况下生成物理一致的随机化示范。
 
-### 必须上传的内容
+![原始域与域随机化示范数据的物理一致同步对照](assets/readme/domain_randomization_pairs.gif)
 
-推荐通过Git上传完整项目，不手工挑选代码文件：
+> 每组左右画面对应同一源 episode、同一帧索引和同一动作序列；随机化只改变纹理与光照，标签中的最大状态偏差来自重放校验。
 
-```text
-/workspace/smolvla/
-├── assets/                 # 完整XML、mesh、纹理和许可证
-├── sim/                    # UR10e MuJoCo环境
-├── collector/              # 数据契约与任务定义
-├── cloud/                  # 云端训练和环境检查
-├── evaluate/               # 本机闭环评测代码、入口和文档
-├── scripts/                # Ubuntu入口脚本
-├── configs/                # 云端训练和本机评测配置
-├── tests/
-├── requirements-cloud.txt
-├── constraints.txt
-└── README.md
-```
-
-数据目录放在`smolvla`项目文件夹内，但仍与Git代码分开传输，且不得单独挑选Parquet或视频：
-
-```text
-/workspace/smolvla/
-└── smolvla-data/
-    └── smolvla_ur10e_mug_v1/
-        ├── meta/           # 包括collector_contract.json和LeRobot metadata
-        ├── data/           # 全部Parquet
-        └── videos/         # 两路相机的全部视频
-```
-
-smoke test上传包含1至4条episode的完整数据集；正式训练再替换为P3产出的80条数据。本阶段按已确认边界不做manifest/SHA-256或schema前置验签，训练入口只检查数据目录存在；不兼容数据会在LeRobot加载或模型前向阶段失败。
-
-首次运行不需要上传基座模型、本机虚拟环境、Hugging Face缓存、本机`outputs/`、临时编码目录、checkpoint或Token文件。`lerobot/smolvla_base`由初始化脚本下载；公开模型无需Token，如确有需要只使用云端环境变量。
-
-### 初始化云端环境
-
-进入一台新服务器后，先运行只读环境查询，并把报告完整回传：
-
-```bash
-cd /workspace/smolvla
-bash scripts/check_server_environment.sh \
-  --output outputs/server_environment.txt
-```
-
-如果要查询指定Python（例如尚未创建项目虚拟环境时的镜像Python）：
-
-```bash
-bash scripts/check_server_environment.sh \
-  --python "$(command -v python)" \
-  --output outputs/server_environment_before_bootstrap.txt
-```
-
-该脚本不安装依赖、不下载模型、不修改系统，只汇总操作系统、CPU、内存、磁盘、GPU、驱动、CUDA、Python/PyTorch、FFmpeg、EGL库以及项目数据目录状态。未指定`--output`时只打印到终端。
-
-确认硬件报告后，再初始化正式环境：
-
-```bash
-cd /workspace/smolvla
-bash scripts/bootstrap_cloud.sh --install-system-packages
-source .venv-cloud/bin/activate
-```
-
-初始化脚本安装锁定依赖，并检查`nvidia-smi`、PyTorch CUDA、显存、FFmpeg、公开模型下载和MuJoCo EGL双相机渲染。系统依赖已由云平台提供时可省略`--install-system-packages`。如需覆盖官方wheel源：
-
-```bash
-bash scripts/bootstrap_cloud.sh \
-  --torch-index-url https://download.pytorch.org/whl/cu126
-```
-
-初始化脚本接受Python 3.10或3.11，并优先检测`python3.11`。如需指定当前镜像的解释器，可传入`--python "$(command -v python)"`；脚本不会擅自添加第三方APT源。
-
-脚本不会安装或修改NVIDIA驱动。GPU、模型下载或EGL检查失败时必须先处理根因。
-
-### 一键 smoke test
-
-```bash
-cd /workspace/smolvla
-bash scripts/smoke_test.sh \
-  --dataset-root smolvla-data/smolvla_ur10e_mug_v1 \
-  --output-dir outputs/smoke
-```
-
-该命令依次完成环境检查、真实数据加载、1-step训练，并检查生成的checkpoint是否包含模型配置、权重和策略前后处理器。闭环评测不在云端smoke中执行。
-
-### 正式训练
-
-先查看最终命令：
+- 保留 **40 条原始域轨迹 + 40 条随机化域轨迹，共 80 条、18,984 帧**；
+- 训练时对原始域与随机化域数据进行均衡采样：原始域数据回放用于维持已有任务能力，随机化域数据提供视觉变化监督；
+- 从 s12000 checkpoint 继续训练动作专家 6000 步，得到有效训练步数为 s18000 的 DR 模型。
 
 ```bash
 bash scripts/train.sh \
-  --dataset-root smolvla-data/smolvla_ur10e_mug_v1 \
-  --config configs/train/mug_b8_s8000.yaml \
-  --output-dir outputs/train/smolvla_ur10e_mug_v1_b8_s8000 \
-  --dry-run
+  --config configs/train/mug_dr_s12000.yaml \
+  --dataset-root smolvla-data/smolvla_ur10e_mug_dr
 ```
 
-确认后移除`--dry-run`执行。训练从`lerobot/smolvla_base`初始化，输入和输出特征由数据集推断为两路相机、7维状态和7维动作，同时增加一路masked empty camera。RTX 4090 训练配置见`configs/train/mug_b8_s8000.yaml`（FP16 AMP、batch size 8、10000 steps）。
+---
 
-## 本机 SmolVLA 闭环评测
+## 阶段三：执行层轨迹优化（Deployment Optimization）⭐
 
-评测固定在本笔记本的`smolvla-eval` Conda环境执行。正式矩阵为10个未见场景、4类任务、canonical/synonym/unseen三种措辞和固定`policy_seed=20260`，共120条；每条最多400步。评测代码和PowerShell入口统一位于`evaluate/`，YAML配置保留在`configs/`。
+**核心问题**：SmolVLA 每次生成一个 Action Chunk，执行前 25 步后重新预测。相邻动作块由两次独立推理产生，边界处可能出现关节目标跳变或运动方向突变。本项目在不修改模型权重的情况下组合两项执行层处理。
+
+### 3.1 关节运动限制器
+
+策略输出的绝对关节目标可能使相邻控制步变化超出专家示教分布。限制器使用专家轨迹的关节速度与加速度 p99 再乘 1.1 裕量进行标定，将单步目标转换为满足 `velocity_limits` / `acceleration_limits` 的渐进参考轨迹：分别约束期望速度和加速度，再积分出本步参考位置；并做**跨目标检测**——积分参考点越过模型目标时精确停靠，避免振荡。第 7 维夹爪指令原样透传。
+
+### 3.2 ChunkBlend 动作块边界融合
+
+重预测时以**旧 chunk 尾帧为锚点**（即边界时刻实际到达的目标），对新 chunk 前 K 帧做线性插值，让新 chunk 从旧 chunk 的终点出发。两个关键保护：
+
+- **角度回卷**：关节角是循环量，插值前把角度差回卷到 `[-π, π)`，避免跨 π 时多转一整圈（如 +3.0 与 -3.0 直插绕远路）；
+- **夹爪透传**：第 7 维是离散开/合语义，不参与插值，避免产生「半开半合」的无效中间夹持力。
+
+### 3.3 联合控制效果
+
+对照采用同一 s12000 checkpoint、同一代码版本及相同的 20 个未见场景 × 2 个任务 × 3 个 `policy_seed`。基线关闭限制器并设置 K=0；联合控制组启用 **K=4 ChunkBlend + p99×1.1 关节运动限制器**。
+
+![四组闭环任务在轨迹优化前后的同步对照](assets/readme/trajectory_optimization.gif)
+
+> 四组对照覆盖蓝色、黄色两类任务，基线与联合控制均成功，并按控制步同步播放。每组标题给出该轨迹的 Jerk 与 Chunk 边界跳变降幅。
+
+| 指标（逐轨迹中位数） | 基线 | 联合控制 | 变化 |
+| --- | ---: | ---: | ---: |
+| 末端 Jerk P95（m/s³） | 42.76 | **29.98** | **↓ 29.9%** |
+| Chunk 边界跳变 P95（rad） | 0.02262 | **0.01430** | **↓ 36.8%** |
+| 边界方向翻转率 | 9.55% | **0** | **消除方向反转** |
+
+联合控制将高频末端运动与动作块边界突变同时压低。成功率为 95.0%（114/120）→ 96.67%（116/120），Scene 配对 Bootstrap 的差值 95% CI 为 **[0, 4.17] 个百分点**，成功轨迹步数中位数为 255.5 → 252，P90 为 307.4 → 308。
+
+---
+
+## 阶段四：评测与诊断（Evaluation & Diagnosis）⭐
+
+### 4.1 闭环评测协议
+
+- **双随机性显式建模**：`scene_seed` 控制物体布局随机性，`policy_seed` 控制 Flow Matching 的 Action Chunk 采样噪声；
+- 20 Hz 闭环执行：每次预测 50 步、只执行前 25 步后重规划（execution horizon），每条最多 360 步；
+- **严格成功口径**：目标物进入内缩边界 + 直立稳定 0.5 秒 + 夹爪已释放；
+- 断点续跑：结果按稳定实验键（`scene|task|prompt|policy`）即时落盘，支持 SHA-256 校验的 `--resume`。
+
+### 4.2 Scene-level Bootstrap
+
+**问题陈述**：单点成功率无法表达场景差异带来的不确定性。评测矩阵中同一场景下有多条轨迹（多个 `policy_seed`），它们**共享同一布局随机性**——若把同场景下的轨迹当作独立样本直接算区间，会犯 **Pseudo-replication（假重复）** 统计错误，区间会被显著低估、高估显著性。
+
+**解决方案**：以 `scene_seed` 为**聚类单元**做有放回重采样（B=10000）：每次从 20 个场景中整组抽取场景，**同一场景内的全部轨迹（含全部 policy_seed）整体进出**，重算成功率；最终置信区间取重采样分布的分位数——即 **Percentile Method（分位数法）**。
+
+| 维度 | 配置 |
+| --- | --- |
+| 评测规模 | 20 个未见场景 × 2 个任务 × 3 个 policy_seed = **120 条 rollout** |
+| 联合控制组严格成功率 | **96.67%（116/120）** |
+| 95% 置信区间（Scene 分层 cluster Bootstrap） | **[93.33%, 99.17%]** |
+| 重采样 | B=10000，聚类单元 = scene_seed |
+
+### 4.3 自动化阶段失败分类器
+
+**解决的问题**：评测 120 条 rollout 后，人工逐条回看视频归因不可扩展。评测器内置**自动化失败分类器**，结束后直接产出失败归因分布，无需人工回看视频：
+
+| 分类维度 | 含义 |
+| --- | --- |
+| `grasp_failure` | 抓取失败（未抓住 / 抓取后脱落） |
+| `transport_failure` | 搬运掉落（运输途中目标脱离夹爪） |
+| `place_failure` | 放置偏移 / 未稳定（未达内缩边界或未满足稳定条件） |
+| `timeout` | 超时（达到步数上限仍未完成） |
+| `control_exception` | 控制异常（仿真/控制有效性异常，不计为策略失败） |
+
+评测结束即输出逐条归因、按任务/场景交叉分布与阶段进展统计（S1–S5 各阶段到达率与失败阶段），支撑「先归因、后补采/调参」的迭代闭环。
+
+### 4.4 DR-s18000 视觉鲁棒性表现
+
+DR-s18000 使用 16 个未见场景 × 2 个任务 × 2 个 `policy_seed` × 9 个外观/光照条件，共完成 **576 次闭环 rollout**。灰、紫、橙三种纯色及 `new_light` 均未参与训练。
+
+![DR-s18000在原始域、训练域与未见颜色上的闭环成功率及置信区间](assets/readme/dr_robustness_results.png)
+
+> 柱高为严格成功率，误差线为 Scene Bootstrap 95% CI；该图描述 DR-s18000 checkpoint 的表现，不构成相对未做 DR 模型的因果对照。
+
+| 视觉条件 | 默认光照 | 未见光照 `new_light` |
+| --- | ---: | ---: |
+| 原始外观 | **92.2%** | **92.2%** |
+| 未见灰色 | 45.3% | 37.5% |
+| 未见紫色 | 75.0% | 78.1% |
+| 未见橙色 | 60.9% | 64.1% |
+| 三种未见颜色宏平均 | **60.4%** | **59.9%** |
+
+训练域组合 `changed@alt` 的成功率为 **79.7%**。原始外观在默认与未见光照下均保持 92.2%，说明该 checkpoint 对本次光照变化表现稳定；未见颜色取得部分泛化，其中灰色仍是主要弱项。
+
+> 本矩阵是 DR-s18000 checkpoint 的描述性评测，缺少相同协议下的未做 DR 模型对照，因此不将上述结果表述为域随机化带来的因果提升，也不外推到复杂材质或 Sim2Real。
+
+---
+
+## 快速复现
 
 ```powershell
+# 1. 进入评测环境（本机 Windows + smolvla-eval Conda 环境）
 conda activate smolvla-eval
+
+# 2. 联合控制组：120 条多 seed 闭环评测
 .\evaluate\run.ps1 `
-  --checkpoint outputs\train\smolvla_ur10e `
-  --config configs\eval_standard.yaml `
-  --output-dir outputs\eval\formal_020000 `
-  --resume
+  --checkpoint outputs\train\smolvla_ur10e_mug_v1_b8_s12000\checkpoints\last\pretrained_model `
+  --config configs\eval\mug_v1_s12000_unseen_multiseed_k4_limiter.yaml `
+  --chunk-blend 4 `
+  --output-dir outputs\eval\s12000_unseen_multiseed_k4_limiter
+
+# 3. DR-s18000：576 条颜色 OOD × 光照鲁棒性评测
+python -m evaluate.diagnose_mug_visual_robustness `
+  --checkpoint outputs\train\smolvla_ur10e_mug_v1_dr_b8_s18000 `
+  --config configs\eval\mug_robustness\diagnose_mug_color_ood_dr.yaml `
+  --output-dir outputs\eval\robustness\mug_color_ood_dr_s18000
+
+# 4. 从现有数据集与评测结果重建 README 素材
+python -m scripts.build_readme_media
 ```
 
-入口同时固定场景seed与SmolVLA采样使用的policy seed，每条完成后即时写入JSONL并支持严格断点续跑。支持通过`--execution-horizon 10`执行“预测50步、只执行前10步后重规划”的Receding Horizon诊断。输出包含运行manifest、逐步动作日志、逐维动作裁剪统计、JSONL、CSV、汇总JSON、Markdown报告、视频保留清单和审计视频。完整实验设计、Bootstrap口径、冒烟及预实验命令见[本机模型效果评测文档](evaluate/README.md)。
+联合控制的基线组使用 `configs\eval\mug_v1_s12000_unseen_multiseed_baseline.yaml`，并关闭 `--chunk-blend`。完整 DR 设计与结论边界见 `域随机化训练思路与实验设计.md`。
 
-另提供`configs/eval_seen.yaml`作为已见场景对照：使用训练中出现过的scene seed `0-5`，在四类canonical任务和固定`policy_seed=20260`上执行24条rollout。该结果应与正式实验的canonical子集比较，用于观察已见布局与未见布局的差距。
+---
 
-### 从训练服务器下载checkpoint
+## 项目结构
 
-不得只传`model.safetensors`，必须上传完整目录：
+| 目录 | 职责 |
+| --- | --- |
+| `sim/` | UR10e MuJoCo 仿真环境、严格成功判定与失败分类 |
+| `collector/` | 键盘遥操作采集、LeRobot v3 数据集写入与质检 |
+| `cloud/` | 云端训练入口、环境预检与 smoke test |
+| `evaluate/` | 闭环 rollout、Bootstrap 统计、阶段检测与诊断工具 |
+| `configs/` | 评测 / 训练 / 运动限制 / 鲁棒性配置 |
+| `scripts/` | 跨 seed 聚合分析、云端入口脚本 |
+| `assets/` | MuJoCo 模型资源、README 可视化素材与第三方许可证 |
+| `tests/` | 场景、采集、评测与诊断的单元测试 |
 
-```text
-pretrained_model/
-├── config.json
-├── model.safetensors
-├── train_config.json
-├── policy_preprocessor.json
-├── policy_postprocessor.json
-└── policy_*_processor.safetensors
-```
-
-评测入口会拒绝缺少配置、权重或处理器定义的checkpoint，避免使用错误归一化统计执行闭环。
+---
