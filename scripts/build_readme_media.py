@@ -93,6 +93,7 @@ ROBUSTNESS_PNG = "dr_robustness_results.png"
 DEFAULT_GIF_FPS = 8
 DEFAULT_MAX_GIF_MB = 8.0
 SOURCE_FPS = 20.0
+TRAJECTORY_PLAYBACK_SPEED = 2.0
 LABEL_BG = (12, 18, 28, 215)
 WHITE = (255, 255, 255, 255)
 
@@ -674,7 +675,14 @@ def build_trajectory_comparison_gif(
     total_steps = max(
         max(len(item["baseline"]), len(item["controlled"])) for item in decoded
     )
-    output_count = max(2, int(math.ceil(total_steps / SOURCE_FPS * fps)))
+    output_count = max(
+        2,
+        int(
+            math.ceil(
+                total_steps / SOURCE_FPS / TRAJECTORY_PLAYBACK_SPEED * fps
+            )
+        ),
+    )
     label_font = _load_font(font_path, 14)
     header_font = _load_font(font_path, 13)
     output_frames: list[Image.Image] = []
@@ -686,7 +694,16 @@ def build_trajectory_comparison_gif(
             controlled_frames = item["controlled"]
             pair_steps = max(len(baseline_frames), len(controlled_frames))
             source_step = min(
-                pair_steps, int(round(output_index * SOURCE_FPS / fps)) + 1
+                pair_steps,
+                int(
+                    round(
+                        output_index
+                        * SOURCE_FPS
+                        * TRAJECTORY_PLAYBACK_SPEED
+                        / fps
+                    )
+                )
+                + 1,
             )
             source_index = source_step - 1
             left_frame = baseline_frames[min(source_index, len(baseline_frames) - 1)]
